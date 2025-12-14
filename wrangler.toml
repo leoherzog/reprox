@@ -1,0 +1,17 @@
+name = "reprox"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+# KV namespace for caching metadata
+[[kv_namespaces]]
+binding = "CACHE"
+id = "your-kv-namespace-id"
+preview_id = "your-preview-kv-namespace-id"
+
+# Environment variables (set via wrangler secret)
+# GPG_PRIVATE_KEY - ASCII armored private key for signing
+# GITHUB_TOKEN - GitHub PAT for API rate limits (optional but recommended)
+
+[vars]
+# Default cache TTL in seconds (24 hours)
+CACHE_TTL = "86400"
