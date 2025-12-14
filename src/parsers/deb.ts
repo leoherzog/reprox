@@ -14,36 +14,6 @@ import { parseTar, findTarEntry } from './tar';
  * - data.tar.gz (actual files) - ignored
  */
 
-// Minimum bytes needed to extract control data (usually ~20KB is enough)
-const MIN_RANGE_SIZE = 65536; // 64KB
-
-/**
- * Extract control metadata from a .deb package URL using Range Request.
- * This is the "Blind Parser" - fetches only the first 64KB header portion.
- */
-export async function extractDebMetadata(
-  assetUrl: string,
-  githubToken?: string
-): Promise<DebianControlData> {
-  const headers: HeadersInit = {
-    Range: `bytes=0-${MIN_RANGE_SIZE - 1}`,
-    Accept: 'application/octet-stream',
-  };
-
-  if (githubToken) {
-    headers['Authorization'] = `token ${githubToken}`;
-  }
-
-  const response = await fetch(assetUrl, { headers });
-
-  if (!response.ok && response.status !== 206) {
-    throw new Error(`Failed to fetch .deb header: ${response.status} ${response.statusText}`);
-  }
-
-  const buffer = await response.arrayBuffer();
-  return parseDebBufferAsync(buffer);
-}
-
 /**
  * Parse a .deb file buffer (or partial buffer) to extract control data.
  * Handles gzip-compressed control archives (most common).

@@ -104,6 +104,11 @@ export function parseRpmBuffer(buffer: ArrayBuffer): RpmHeaderData {
   const view = new DataView(buffer);
   const bytes = new Uint8Array(buffer);
 
+  // Check buffer has minimum required size
+  if (bytes.length < RPM_LEAD_SIZE + HEADER_HEADER_SIZE) {
+    throw new Error('Invalid RPM file: buffer too small');
+  }
+
   // Verify RPM magic
   for (let i = 0; i < 4; i++) {
     if (bytes[i] !== RPM_MAGIC[i]) {

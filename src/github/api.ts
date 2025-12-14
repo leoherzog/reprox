@@ -15,7 +15,7 @@ export class GitHubClient {
   private getHeaders(): HeadersInit {
     const headers: HeadersInit = {
       Accept: 'application/vnd.github.v3+json',
-      'User-Agent': 'Repoxy/1.0',
+      'User-Agent': 'Reprox/1.0',
     };
 
     if (this.token) {

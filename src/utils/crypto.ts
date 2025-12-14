@@ -1,5 +1,5 @@
 /**
- * Cryptographic utilities for Repoxy
+ * Cryptographic utilities for Reprox
  *
  * Uses Web Crypto API (crypto.subtle) available in Cloudflare Workers.
  * Note: MD5 is NOT supported by Web Crypto API.
@@ -22,23 +22,6 @@ export async function sha256(data: string | Uint8Array | ArrayBuffer): Promise<s
 }
 
 /**
- * Calculate SHA1 hash of data
- * Note: SHA1 is deprecated for security but still used in some repo formats
- */
-export async function sha1(data: string | Uint8Array | ArrayBuffer): Promise<string> {
-  let buffer: BufferSource;
-
-  if (typeof data === 'string') {
-    buffer = new TextEncoder().encode(data);
-  } else {
-    buffer = data;
-  }
-
-  const hashBuffer = await crypto.subtle.digest('SHA-1', buffer);
-  return bufferToHex(hashBuffer);
-}
-
-/**
  * Convert ArrayBuffer to lowercase hex string
  */
 function bufferToHex(buffer: ArrayBuffer): string {
@@ -56,26 +39,6 @@ export async function gzipCompress(data: string | Uint8Array): Promise<Uint8Arra
   const cs = new CompressionStream('gzip');
   const blob = new Blob([input]);
   const stream = blob.stream().pipeThrough(cs);
-
-  const chunks: Uint8Array[] = [];
-  const reader = stream.getReader();
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-
-  return concatUint8Arrays(chunks);
-}
-
-/**
- * Decompress gzip data using native DecompressionStream
- */
-export async function gzipDecompress(data: Uint8Array): Promise<Uint8Array> {
-  const ds = new DecompressionStream('gzip');
-  const blob = new Blob([data]);
-  const stream = blob.stream().pipeThrough(ds);
 
   const chunks: Uint8Array[] = [];
   const reader = stream.getReader();

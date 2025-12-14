@@ -1,14 +1,15 @@
-import type { CachedMetadata, PackageEntry } from '../types';
-
 /**
  * KV Cache Manager
  *
  * Handles caching of package metadata in Cloudflare KV.
  * Key structure:
- * - meta:{owner}:{repo}:{releaseId} - Full package metadata for a release
  * - packages:{owner}:{repo}:{arch} - Generated Packages file content
  * - release:{owner}:{repo} - Generated Release file content
  * - inrelease:{owner}:{repo} - Signed InRelease file content
+ * - latest:{owner}:{repo} - Latest release ID for cache validation
+ * - rpm:primary:{owner}:{repo} - RPM primary.xml content
+ * - rpm:filelists:{owner}:{repo} - RPM filelists.xml content
+ * - rpm:other:{owner}:{repo} - RPM other.xml content
  */
 
 export class CacheManager {
@@ -18,13 +19,6 @@ export class CacheManager {
   constructor(kv: KVNamespace, ttlSeconds = 86400) {
     this.kv = kv;
     this.defaultTtl = ttlSeconds;
-  }
-
-  /**
-   * Generate cache key for metadata
-   */
-  private metaKey(owner: string, repo: string, releaseId: number): string {
-    return `meta:${owner}:${repo}:${releaseId}`;
   }
 
   /**
@@ -56,31 +50,10 @@ export class CacheManager {
   }
 
   /**
-   * Get cached metadata for a specific release
+   * Generate cache key for RPM metadata files
    */
-  async getMetadata(
-    owner: string,
-    repo: string,
-    releaseId: number
-  ): Promise<CachedMetadata | null> {
-    const key = this.metaKey(owner, repo, releaseId);
-    const cached = await this.kv.get(key, 'json');
-    return cached as CachedMetadata | null;
-  }
-
-  /**
-   * Store metadata for a release
-   */
-  async setMetadata(
-    owner: string,
-    repo: string,
-    releaseId: number,
-    metadata: CachedMetadata
-  ): Promise<void> {
-    const key = this.metaKey(owner, repo, releaseId);
-    await this.kv.put(key, JSON.stringify(metadata), {
-      expirationTtl: this.defaultTtl,
-    });
+  private rpmMetadataKey(owner: string, repo: string, type: 'primary' | 'filelists' | 'other'): string {
+    return `rpm:${type}:${owner}:${repo}`;
   }
 
   /**
@@ -152,7 +125,9 @@ export class CacheManager {
   async getLatestReleaseId(owner: string, repo: string): Promise<number | null> {
     const key = this.latestReleaseKey(owner, repo);
     const value = await this.kv.get(key, 'text');
-    return value ? parseInt(value, 10) : null;
+    if (!value) return null;
+    const parsed = parseInt(value, 10);
+    return isNaN(parsed) ? null : parsed;
   }
 
   /**
@@ -181,37 +156,62 @@ export class CacheManager {
     return cachedReleaseId !== currentReleaseId;
   }
 
+  // =============================================================================
+  // RPM Caching Methods
+  // =============================================================================
+
   /**
-   * Invalidate all cache for a repository
+   * Get cached RPM primary.xml content
    */
-  async invalidateRepo(owner: string, repo: string): Promise<void> {
-    // Note: KV doesn't support prefix deletion directly
-    // We'll delete known keys
-    const keysToDelete = [
-      this.releaseKey(owner, repo),
-      this.inReleaseKey(owner, repo),
-      this.latestReleaseKey(owner, repo),
-    ];
-
-    // Add common architecture keys
-    const architectures = ['amd64', 'arm64', 'i386', 'armhf', 'all'];
-    for (const arch of architectures) {
-      keysToDelete.push(this.packagesKey(owner, repo, arch));
-    }
-
-    await Promise.all(keysToDelete.map(key => this.kv.delete(key)));
+  async getRpmPrimaryXml(owner: string, repo: string): Promise<string | null> {
+    const key = this.rpmMetadataKey(owner, repo, 'primary');
+    return this.kv.get(key, 'text');
   }
 
   /**
-   * Get all package entries from metadata
+   * Store RPM primary.xml content
    */
-  async getAllPackages(
-    owner: string,
-    repo: string,
-    releaseId: number
-  ): Promise<PackageEntry[]> {
-    const metadata = await this.getMetadata(owner, repo, releaseId);
-    return metadata?.packages || [];
+  async setRpmPrimaryXml(owner: string, repo: string, content: string): Promise<void> {
+    const key = this.rpmMetadataKey(owner, repo, 'primary');
+    await this.kv.put(key, content, {
+      expirationTtl: this.defaultTtl,
+    });
+  }
+
+  /**
+   * Get cached RPM filelists.xml content
+   */
+  async getRpmFilelistsXml(owner: string, repo: string): Promise<string | null> {
+    const key = this.rpmMetadataKey(owner, repo, 'filelists');
+    return this.kv.get(key, 'text');
+  }
+
+  /**
+   * Store RPM filelists.xml content
+   */
+  async setRpmFilelistsXml(owner: string, repo: string, content: string): Promise<void> {
+    const key = this.rpmMetadataKey(owner, repo, 'filelists');
+    await this.kv.put(key, content, {
+      expirationTtl: this.defaultTtl,
+    });
+  }
+
+  /**
+   * Get cached RPM other.xml content
+   */
+  async getRpmOtherXml(owner: string, repo: string): Promise<string | null> {
+    const key = this.rpmMetadataKey(owner, repo, 'other');
+    return this.kv.get(key, 'text');
+  }
+
+  /**
+   * Store RPM other.xml content
+   */
+  async setRpmOtherXml(owner: string, repo: string, content: string): Promise<void> {
+    const key = this.rpmMetadataKey(owner, repo, 'other');
+    await this.kv.put(key, content, {
+      expirationTtl: this.defaultTtl,
+    });
   }
 }
 
@@ -222,6 +222,7 @@ export function createCacheManager(
   kv: KVNamespace,
   cacheTtl?: string
 ): CacheManager {
-  const ttl = cacheTtl ? parseInt(cacheTtl, 10) : 86400;
+  const parsed = cacheTtl ? parseInt(cacheTtl, 10) : 86400;
+  const ttl = isNaN(parsed) ? 86400 : parsed;
   return new CacheManager(kv, ttl);
 }

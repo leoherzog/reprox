@@ -90,6 +90,15 @@ export default {
         return new Response('Invalid repository path. Use /{owner}/{repo}/...', { status: 400 });
       }
 
+      // Validate owner/repo format (GitHub naming rules)
+      const validNamePattern = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
+      if (!validNamePattern.test(route.owner) || route.owner.length > 39) {
+        return new Response('Invalid owner name', { status: 400 });
+      }
+      if (!validNamePattern.test(route.repo) || route.repo.length > 100) {
+        return new Response('Invalid repository name', { status: 400 });
+      }
+
       // Initialize services
       const github = new GitHubClient(env.GITHUB_TOKEN);
       const cache = createCacheManager(env.CACHE, env.CACHE_TTL);
@@ -851,6 +860,31 @@ async function handleRepomdAsc(
 }
 
 /**
+ * Helper to create RPM XML response (with optional gzip compression)
+ */
+async function createRpmXmlResponse(
+  content: string,
+  compressed: boolean
+): Promise<Response> {
+  if (compressed) {
+    const gzipped = await gzipCompress(content);
+    return new Response(gzipped, {
+      headers: {
+        'Content-Type': 'application/gzip',
+        'Cache-Control': 'public, max-age=300',
+      },
+    });
+  }
+
+  return new Response(content, {
+    headers: {
+      'Content-Type': 'application/xml',
+      'Cache-Control': 'public, max-age=300',
+    },
+  });
+}
+
+/**
  * Handle primary.xml request - uncompressed RPM package metadata
  */
 async function handlePrimary(
@@ -860,15 +894,8 @@ async function handlePrimary(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const packages = await getRpmPackageEntries(route, github, cache, env, ctx);
-  const content = generatePrimaryXml(packages);
-
-  return new Response(content, {
-    headers: {
-      'Content-Type': 'application/xml',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
+  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
+  return createRpmXmlResponse(metadata.primaryXml, false);
 }
 
 /**
@@ -881,16 +908,8 @@ async function handlePrimaryGz(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const packages = await getRpmPackageEntries(route, github, cache, env, ctx);
-  const content = generatePrimaryXml(packages);
-  const compressed = await gzipCompress(content);
-
-  return new Response(compressed, {
-    headers: {
-      'Content-Type': 'application/gzip',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
+  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
+  return createRpmXmlResponse(metadata.primaryXml, true);
 }
 
 /**
@@ -903,15 +922,8 @@ async function handleFilelists(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const packages = await getRpmPackageEntries(route, github, cache, env, ctx);
-  const content = generateFilelistsXml(packages);
-
-  return new Response(content, {
-    headers: {
-      'Content-Type': 'application/xml',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
+  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
+  return createRpmXmlResponse(metadata.filelistsXml, false);
 }
 
 /**
@@ -924,16 +936,8 @@ async function handleFilelistsGz(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const packages = await getRpmPackageEntries(route, github, cache, env, ctx);
-  const content = generateFilelistsXml(packages);
-  const compressed = await gzipCompress(content);
-
-  return new Response(compressed, {
-    headers: {
-      'Content-Type': 'application/gzip',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
+  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
+  return createRpmXmlResponse(metadata.filelistsXml, true);
 }
 
 /**
@@ -946,15 +950,8 @@ async function handleOther(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const packages = await getRpmPackageEntries(route, github, cache, env, ctx);
-  const content = generateOtherXml(packages);
-
-  return new Response(content, {
-    headers: {
-      'Content-Type': 'application/xml',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
+  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
+  return createRpmXmlResponse(metadata.otherXml, false);
 }
 
 /**
@@ -967,16 +964,8 @@ async function handleOtherGz(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const packages = await getRpmPackageEntries(route, github, cache, env, ctx);
-  const content = generateOtherXml(packages);
-  const compressed = await gzipCompress(content);
-
-  return new Response(compressed, {
-    headers: {
-      'Content-Type': 'application/gzip',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
+  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
+  return createRpmXmlResponse(metadata.otherXml, true);
 }
 
 /**
@@ -988,31 +977,64 @@ async function handleRpmBinaryRedirect(
 ): Promise<Response> {
   const { owner, repo, filename } = route;
 
-  const latestRelease = await github.getLatestRelease(owner, repo);
-  const asset = latestRelease.assets.find(a => a.name === filename);
+  try {
+    const latestRelease = await github.getLatestRelease(owner, repo);
+    const asset = latestRelease.assets.find(a => a.name === filename);
 
-  if (!asset) {
-    return new Response(`RPM package not found: ${filename}`, { status: 404 });
+    if (!asset) {
+      return new Response(`RPM package not found: ${filename}`, { status: 404 });
+    }
+
+    return Response.redirect(asset.browser_download_url, 302);
+  } catch (error) {
+    console.error('RPM binary redirect failed:', error);
+    return new Response('RPM package not found', { status: 404 });
   }
-
-  return Response.redirect(asset.browser_download_url, 302);
 }
 
 /**
- * Get RPM package entries from GitHub release
+ * Cached RPM metadata content
  */
-async function getRpmPackageEntries(
+interface CachedRpmMetadata {
+  primaryXml: string;
+  filelistsXml: string;
+  otherXml: string;
+}
+
+/**
+ * Get or generate RPM metadata with caching
+ */
+async function getCachedRpmMetadata(
   route: RouteInfo,
   github: GitHubClient,
   cache: CacheManager,
   env: Env,
   ctx: ExecutionContext
-): Promise<RpmPackageEntry[]> {
+): Promise<CachedRpmMetadata> {
   const { owner, repo } = route;
 
-  // TODO: Add caching for RPM metadata similar to APT
-  // For now, generate fresh each time
+  // Check cache first
+  const cachedReleaseId = await cache.getLatestReleaseId(owner, repo);
+  if (cachedReleaseId) {
+    const [cachedPrimary, cachedFilelists, cachedOther] = await Promise.all([
+      cache.getRpmPrimaryXml(owner, repo),
+      cache.getRpmFilelistsXml(owner, repo),
+      cache.getRpmOtherXml(owner, repo),
+    ]);
 
+    if (cachedPrimary && cachedFilelists && cachedOther) {
+      // Validate in background
+      ctx.waitUntil(validateAndRefreshRpmCache(route, github, cache, env, ctx));
+
+      return {
+        primaryXml: cachedPrimary,
+        filelistsXml: cachedFilelists,
+        otherXml: cachedOther,
+      };
+    }
+  }
+
+  // No cache - generate fresh content
   const latestRelease = await github.getLatestRelease(owner, repo);
   const rpmAssets = filterRpmAssets(latestRelease.assets);
 
@@ -1028,7 +1050,71 @@ async function getRpmPackageEntries(
     })
   );
 
-  return entries.filter((e): e is RpmPackageEntry => e !== null);
+  const packages = entries.filter((e): e is RpmPackageEntry => e !== null);
+
+  // Generate all XML content
+  const primaryXml = generatePrimaryXml(packages);
+  const filelistsXml = generateFilelistsXml(packages);
+  const otherXml = generateOtherXml(packages);
+
+  // Cache in background
+  ctx.waitUntil(
+    Promise.all([
+      cache.setRpmPrimaryXml(owner, repo, primaryXml),
+      cache.setRpmFilelistsXml(owner, repo, filelistsXml),
+      cache.setRpmOtherXml(owner, repo, otherXml),
+      cache.setLatestReleaseId(owner, repo, latestRelease.id),
+    ])
+  );
+
+  return { primaryXml, filelistsXml, otherXml };
+}
+
+/**
+ * Background task to validate and refresh RPM cache if needed
+ */
+async function validateAndRefreshRpmCache(
+  route: RouteInfo,
+  github: GitHubClient,
+  cache: CacheManager,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<void> {
+  try {
+    const { owner, repo } = route;
+    const latestRelease = await github.getLatestRelease(owner, repo);
+    const needsRefresh = await cache.needsRefresh(owner, repo, latestRelease.id);
+
+    if (needsRefresh) {
+      const rpmAssets = filterRpmAssets(latestRelease.assets);
+
+      const entries = await Promise.all(
+        rpmAssets.map(async (asset) => {
+          try {
+            return await buildRpmPackageEntry(asset, env.GITHUB_TOKEN);
+          } catch (error) {
+            console.error(`Failed to process ${asset.name}:`, error);
+            return null;
+          }
+        })
+      );
+
+      const packages = entries.filter((e): e is RpmPackageEntry => e !== null);
+
+      const primaryXml = generatePrimaryXml(packages);
+      const filelistsXml = generateFilelistsXml(packages);
+      const otherXml = generateOtherXml(packages);
+
+      await Promise.all([
+        cache.setRpmPrimaryXml(owner, repo, primaryXml),
+        cache.setRpmFilelistsXml(owner, repo, filelistsXml),
+        cache.setRpmOtherXml(owner, repo, otherXml),
+        cache.setLatestReleaseId(owner, repo, latestRelease.id),
+      ]);
+    }
+  } catch (error) {
+    console.error('Background RPM cache validation failed:', error);
+  }
 }
 
 /**
@@ -1041,23 +1127,18 @@ async function getRpmMetadataFiles(
   env: Env,
   ctx: ExecutionContext
 ): Promise<RepomdFileInfo> {
-  const packages = await getRpmPackageEntries(route, github, cache, env, ctx);
-
-  // Generate all XML content
-  const primaryXml = generatePrimaryXml(packages);
-  const filelistsXml = generateFilelistsXml(packages);
-  const otherXml = generateOtherXml(packages);
+  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
 
   // Compress all files
   const [primaryGz, filelistsGz, otherGz] = await Promise.all([
-    gzipCompress(primaryXml),
-    gzipCompress(filelistsXml),
-    gzipCompress(otherXml),
+    gzipCompress(metadata.primaryXml),
+    gzipCompress(metadata.filelistsXml),
+    gzipCompress(metadata.otherXml),
   ]);
 
   return {
-    primary: { xml: primaryXml, gz: primaryGz },
-    filelists: { xml: filelistsXml, gz: filelistsGz },
-    other: { xml: otherXml, gz: otherGz },
+    primary: { xml: metadata.primaryXml, gz: primaryGz },
+    filelists: { xml: metadata.filelistsXml, gz: filelistsGz },
+    other: { xml: metadata.otherXml, gz: otherGz },
   };
 }

@@ -12,14 +12,9 @@
  * /{owner}/{repo}/Packages/{file}.rpm       - Package files (redirect to GitHub)
  */
 
-import type { RpmPackageEntry, RpmHeaderData } from '../types';
+import type { RpmPackageEntry, RpmHeaderData, AssetLike } from '../types';
 import { sha256, gzipCompress } from '../utils/crypto';
 import { extractRpmMetadata, extractRpmArchFromFilename } from '../parsers/rpm';
-
-/**
- * Minimal asset type for filtering (subset of GitHubAsset)
- */
-type AssetLike = { name: string; size: number; browser_download_url: string };
 
 /**
  * Metadata file info for repomd.xml generation
@@ -256,19 +251,4 @@ export function filterRpmAssets<T extends AssetLike>(assets: T[]): T[] {
   return assets.filter(asset =>
     asset.name.endsWith('.rpm') && !asset.name.includes('.src.rpm')
   );
-}
-
-/**
- * Get unique architectures from RPM assets
- */
-export function getRpmArchitectures<T extends AssetLike>(assets: T[]): string[] {
-  const archs = new Set<string>();
-
-  for (const asset of assets) {
-    if (asset.name.endsWith('.rpm')) {
-      archs.add(extractRpmArchFromFilename(asset.name));
-    }
-  }
-
-  return Array.from(archs).sort();
 }

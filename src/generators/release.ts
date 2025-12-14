@@ -160,6 +160,6 @@ export function defaultReleaseConfig(owner: string, repo: string): ReleaseConfig
     codename: 'stable',
     architectures: ['amd64', 'arm64', 'i386', 'all'],
     components: ['main'],
-    description: `APT repository for ${owner}/${repo} via Repoxy`,
+    description: `APT repository for ${owner}/${repo} via Reprox`,
   };
 }

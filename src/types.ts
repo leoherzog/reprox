@@ -22,7 +22,7 @@ export interface RouteInfo {
   hashType?: string;  // For by-hash routes: SHA256, SHA512, etc.
   hash?: string;      // The actual hash value
   type:
-    | 'packages' | 'packages-gz' | 'packages-xz' | 'release' | 'release-gpg' | 'inrelease'
+    | 'packages' | 'packages-gz' | 'release' | 'release-gpg' | 'inrelease'
     | 'by-hash'
     | 'repomd' | 'repomd-asc' | 'primary' | 'primary-gz' | 'filelists' | 'filelists-gz' | 'other' | 'other-gz'
     | 'binary' | 'rpm-binary' | 'public-key' | 'unknown';
@@ -162,3 +162,8 @@ export interface RpmPackageEntry {
   checksum: string;
   checksumType: string;
 }
+
+/**
+ * Minimal asset type for filtering (subset of GitHubAsset)
+ */
+export type AssetLike = { name: string; size: number; browser_download_url: string };

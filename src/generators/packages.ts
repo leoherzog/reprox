@@ -1,11 +1,6 @@
-import type { DebianControlData, PackageEntry } from '../types';
+import type { DebianControlData, PackageEntry, AssetLike } from '../types';
 import { parseDebBufferAsync } from '../parsers/deb';
 import { extractArchFromFilename } from '../github/api';
-
-/**
- * Minimal asset type for filtering (subset of GitHubAsset)
- */
-type AssetLike = { name: string; size: number; browser_download_url: string };
 
 /**
  * Range request size for .deb header parsing
@@ -115,7 +110,7 @@ export async function fetchDebMetadata(
   const headers: HeadersInit = {
     Range: `bytes=0-${RANGE_SIZE - 1}`,
     Accept: 'application/octet-stream',
-    'User-Agent': 'Repoxy/1.0',
+    'User-Agent': 'Reprox/1.0',
   };
 
   if (githubToken) {
@@ -186,15 +181,18 @@ export function filterDebAssets<T extends AssetLike>(assets: T[]): T[] {
 }
 
 /**
- * Filter assets by architecture
+ * Filter assets by architecture.
+ * When arch is 'all', returns only architecture-independent packages.
+ * When arch is specific (e.g., 'amd64'), returns packages for that arch plus 'all' packages.
  */
 export function filterByArchitecture<T extends AssetLike>(assets: T[], arch: string): T[] {
-  if (arch === 'all') {
-    return assets;
-  }
-
   return assets.filter(asset => {
     const assetArch = extractArchFromFilename(asset.name);
+    if (arch === 'all') {
+      // Only return packages marked as architecture-independent
+      return assetArch === 'all';
+    }
+    // Return packages matching the specific arch, plus arch-independent packages
     return assetArch === arch || assetArch === 'all';
   });
 }
