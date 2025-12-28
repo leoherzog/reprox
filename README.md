@@ -60,6 +60,9 @@ git clone https://github.com/leoherzog/reprox.git && cd reprox && npm install
 gpg --quick-gen-key "Reprox" rsa4096 sign never
 gpg --armor --export-secret-keys "Reprox" | wrangler secret put GPG_PRIVATE_KEY
 
+# Optional: if your GPG key has a passphrase
+wrangler secret put GPG_PASSPHRASE
+
 # Optional: add GitHub token for higher rate limits
 wrangler secret put GITHUB_TOKEN
 

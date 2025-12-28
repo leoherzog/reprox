@@ -46,7 +46,7 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - `crypto.ts` - SHA256 hashing and gzip compression (Web Crypto API)
 - `streams.ts` - Stream reading utilities (`readStreamToBuffer`, `concatUint8Arrays`)
 - `architectures.ts` - Architecture detection from filenames (Debian and RPM)
-- `xml.ts` - XML character escaping
+- `xml.ts` - XML escaping and control character sanitization (removes invalid XML 1.0 chars)
 
 **Other**
 - `src/signing/gpg.ts` - OpenPGP signing (cleartext and detached)
@@ -57,13 +57,21 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 ### Design Patterns
 - **Range Requests**: Only fetches package headers to minimize bandwidth
 - **Release ID Caching**: Cache invalidation triggered by new GitHub releases
-- **Architecture Detection**: Parses architecture from filename patterns (amd64, arm64, i386, armhf, all)
+- **Architecture Detection**: Parses architecture from filename patterns
+  - Debian: amd64, arm64, i386, armhf, all
+  - RPM: x86_64, aarch64, i686, noarch
 
 ### Cloudflare Workers Considerations
 
 **Static WASM Imports**: Workers blocks dynamic `WebAssembly.instantiate()` for security (similar to `eval()`). WASM modules must be imported statically at build time.
 
-**XZ Decompression** (`src/lib/xz.ts`): Some .deb packages use `control.tar.xz` compression. The xzwasm library embeds WASM as base64 and uses dynamic instantiation, which doesn't work in Workers. Our solution:
+**Compression Support**: .deb control archives can use different compression formats:
+- `control.tar.gz` - gzip (most common, native DecompressionStream)
+- `control.tar.xz` - XZ (uses xzwasm with static WASM import)
+- `control.tar.zst` - Zstandard (uses fzstd library)
+- `control.tar` - uncompressed
+
+**XZ WASM Handling** (`src/lib/xz.ts`): The xzwasm library embeds WASM as base64 and uses dynamic instantiation, which doesn't work in Workers. Our solution:
 1. `scripts/extract-xz-wasm.cjs` extracts the WASM binary from xzwasm on `npm install` (postinstall hook)
 2. `src/lib/xz.ts` imports the WASM statically and patches `XzReadableStream._moduleInstance` before use
 3. The extracted `src/lib/xz-decompress.wasm` is gitignored (auto-generated)
@@ -74,6 +82,7 @@ If xzwasm is updated, running `npm install` will automatically extract the new W
 
 Optional secrets (set via `wrangler secret put`):
 - `GPG_PRIVATE_KEY` - Armored GPG private key for repository signing (public key is auto-extracted)
+- `GPG_PASSPHRASE` - Passphrase for encrypted GPG private keys (optional, only needed if key is passphrase-protected)
 - `GPG_PUBLIC_KEY` - Armored GPG public key (optional override, normally extracted from private key)
 - `GITHUB_TOKEN` - GitHub personal access token for higher API rate limits
 - `CACHE_TTL` - Cache TTL in seconds for content (default: 86400). Release IDs use a 5-minute TTL for freshness checks.
