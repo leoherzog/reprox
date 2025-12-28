@@ -119,7 +119,7 @@ function generatePackageXml(pkg: RpmPackageEntry): string {
     <name>${escapeXml(headerData.name)}</name>
     <arch>${escapeXml(headerData.arch)}</arch>
     <version epoch="${epoch}" ver="${escapeXml(ver)}" rel="${escapeXml(rel)}"/>
-    <checksum type="${checksumType}" pkgid="YES">${checksum}</checksum>
+    <checksum type="${checksumType}" pkgid="${checksum ? 'YES' : 'NO'}">${checksum}</checksum>
     <summary>${escapeXml(headerData.summary)}</summary>
     <description>${escapeXml(headerData.description)}</description>
     <packager>${escapeXml(headerData.packager || headerData.vendor)}</packager>
@@ -161,7 +161,7 @@ function generateFilelistPackageXml(pkg: RpmPackageEntry): string {
   // Generate file entries
   const filesXml = headerData.files.map(f => `    <file>${escapeXml(f)}</file>`).join('\n');
 
-  return `  <package pkgid="" name="${escapeXml(headerData.name)}" arch="${escapeXml(headerData.arch)}">
+  return `  <package pkgid="${pkg.checksum}" name="${escapeXml(headerData.name)}" arch="${escapeXml(headerData.arch)}">
     <version epoch="${epoch}" ver="${escapeXml(headerData.version)}" rel="${escapeXml(headerData.release)}"/>
 ${filesXml}
   </package>`;
@@ -193,7 +193,7 @@ function generateOtherPackageXml(pkg: RpmPackageEntry): string {
     return `    <changelog author="${escapeXml(entry.author)}" date="${date}">${escapeXml(entry.text)}</changelog>`;
   }).join('\n');
 
-  return `  <package pkgid="" name="${escapeXml(headerData.name)}" arch="${escapeXml(headerData.arch)}">
+  return `  <package pkgid="${pkg.checksum}" name="${escapeXml(headerData.name)}" arch="${escapeXml(headerData.arch)}">
     <version epoch="${epoch}" ver="${escapeXml(headerData.version)}" rel="${escapeXml(headerData.release)}"/>
 ${changelogXml}
   </package>`;

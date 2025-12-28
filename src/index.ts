@@ -379,7 +379,7 @@ async function handleInRelease(
 
   let response: string;
   if (env.GPG_PRIVATE_KEY) {
-    response = await signCleartext(releaseContent, env.GPG_PRIVATE_KEY);
+    response = await signCleartext(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
   } else {
     // Return unsigned - client needs [allow-insecure=yes]
     response = releaseContent;
@@ -460,7 +460,7 @@ async function handleReleaseGpg(
   }
 
   // Create detached signature
-  const signature = await signDetached(releaseContent, env.GPG_PRIVATE_KEY);
+  const signature = await signDetached(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
 
   return new Response(signature, {
     headers: {
@@ -594,7 +594,7 @@ async function generateAndCacheAll(
   await cache.setLatestReleaseId(owner, repo, latestRelease.id);
 
   if (env.GPG_PRIVATE_KEY) {
-    const inRelease = await signCleartext(releaseContent, env.GPG_PRIVATE_KEY);
+    const inRelease = await signCleartext(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
     await cache.setInReleaseFile(owner, repo, inRelease);
   }
 }
@@ -850,7 +850,7 @@ async function handleRepomdAsc(
   const repomdXml = await generateRepomdXml(files);
 
   // Sign the repomd.xml
-  const signature = await signDetached(repomdXml, env.GPG_PRIVATE_KEY);
+  const signature = await signDetached(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
 
   return new Response(signature, {
     headers: {

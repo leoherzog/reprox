@@ -3,6 +3,7 @@
  */
 export interface Env {
   GPG_PRIVATE_KEY?: string;
+  GPG_PASSPHRASE?: string;
   GPG_PUBLIC_KEY?: string;
   GITHUB_TOKEN?: string;
   CACHE_TTL?: string;

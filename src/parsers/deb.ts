@@ -53,7 +53,7 @@ export async function parseDebBufferAsync(buffer: ArrayBuffer): Promise<DebianCo
   const tarBuffer = controlTarData.buffer.slice(
     controlTarData.byteOffset,
     controlTarData.byteOffset + controlTarData.byteLength
-  );
+  ) as ArrayBuffer;
   const tarEntries = parseTar(tarBuffer);
   const controlFile = findTarEntry(tarEntries, 'control');
 
