@@ -2,7 +2,6 @@
  * Environment bindings for Cloudflare Worker
  */
 export interface Env {
-  CACHE: KVNamespace;
   GPG_PRIVATE_KEY?: string;
   GPG_PUBLIC_KEY?: string;
   GITHUB_TOKEN?: string;

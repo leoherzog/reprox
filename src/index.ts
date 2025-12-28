@@ -1,6 +1,6 @@
 import type { Env, RouteInfo, PackageEntry, RpmPackageEntry } from './types';
 import { GitHubClient, getArchitecturesFromAssets } from './github/api';
-import { CacheManager, createCacheManager } from './cache/kv';
+import { CacheManager, createCacheManager } from './cache/cache';
 import {
   generatePackagesFile,
   buildPackageEntry,
@@ -101,7 +101,7 @@ export default {
 
       // Initialize services
       const github = new GitHubClient(env.GITHUB_TOKEN);
-      const cache = createCacheManager(env.CACHE, env.CACHE_TTL);
+      const cache = createCacheManager(env.CACHE_TTL);
 
       // Route handling
       switch (route.type) {
