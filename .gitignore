@@ -28,3 +28,6 @@ npm-debug.log*
 
 # Test coverage
 coverage/
+
+# Generated WASM (extracted from xzwasm via postinstall)
+src/lib/xz-decompress.wasm

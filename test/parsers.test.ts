@@ -391,8 +391,80 @@ Description: Full package with all fields`;
     await expect(parseDebBufferAsync(badDeb)).rejects.toThrow('No control file found');
   });
 
-  // Note: uncompressed control.tar has a bug where buffer offset is lost
-  // Most real .deb files use gzip compression which is tested above
+});
+
+// ============================================================================
+// parseDebBufferAsync - Compression Format Tests
+// ============================================================================
+
+describe('parseDebBufferAsync compression formats', () => {
+  const controlContent = `Package: compression-test
+Version: 1.0.0
+Architecture: amd64
+Description: Testing compression formats`;
+
+  it('routes zstd-compressed control archive to fzstd decompression', async () => {
+    const encoder = new TextEncoder();
+
+    // Create AR archive with .zst control containing invalid zstd data
+    // This verifies the code correctly identifies .zst and routes to fzstd
+    // (rather than throwing "Unknown control archive compression")
+    const debArchive = createArArchive([
+      { name: 'debian-binary', content: encoder.encode('2.0\n') },
+      { name: 'control.tar.zst', content: new Uint8Array([0x00, 0x01, 0x02, 0x03]) },
+      { name: 'data.tar.zst', content: new Uint8Array(0) },
+    ]);
+
+    // Should throw fzstd error, not "Unknown control archive compression"
+    await expect(parseDebBufferAsync(debArchive))
+      .rejects.toThrow(/invalid zstd|unexpected eof/i);
+  });
+
+  it('parses deb with uncompressed control archive', async () => {
+    const encoder = new TextEncoder();
+
+    // Create control tar archive (uncompressed)
+    const controlTar = createTarArchive([
+      { name: './control', content: encoder.encode(controlContent) },
+    ]);
+
+    // Create AR archive with uncompressed control.tar
+    const debArchive = createArArchive([
+      { name: 'debian-binary', content: encoder.encode('2.0\n') },
+      { name: 'control.tar', content: new Uint8Array(controlTar) },
+      { name: 'data.tar', content: new Uint8Array(0) },
+    ]);
+
+    const result = await parseDebBufferAsync(debArchive);
+    expect(result.package).toBe('compression-test');
+    expect(result.version).toBe('1.0.0');
+  });
+
+  it('throws on unknown compression format', async () => {
+    const encoder = new TextEncoder();
+
+    // Create AR archive with unsupported compression
+    const badDeb = createArArchive([
+      { name: 'debian-binary', content: encoder.encode('2.0\n') },
+      { name: 'control.tar.lz4', content: new Uint8Array([0x04, 0x22, 0x4d, 0x18]) },
+      { name: 'data.tar.lz4', content: new Uint8Array(0) },
+    ]);
+
+    await expect(parseDebBufferAsync(badDeb))
+      .rejects.toThrow('Unknown control archive compression: control.tar.lz4');
+  });
+
+  it('throws on bz2 compression (not supported)', async () => {
+    const encoder = new TextEncoder();
+
+    const badDeb = createArArchive([
+      { name: 'debian-binary', content: encoder.encode('2.0\n') },
+      { name: 'control.tar.bz2', content: new Uint8Array([0x42, 0x5a, 0x68]) },
+    ]);
+
+    await expect(parseDebBufferAsync(badDeb))
+      .rejects.toThrow('Unknown control archive compression: control.tar.bz2');
+  });
 });
 
 // ============================================================================
@@ -723,5 +795,321 @@ describe('findTarEntry', () => {
     const found = findTarEntry(entries, 'nonexistent');
 
     expect(found).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// AR Parser Edge Cases
+// ============================================================================
+
+describe('parseArHeaders edge cases', () => {
+  it('parses BSD-style extended filenames (#1/ prefix)', () => {
+    const encoder = new TextEncoder();
+    const magic = encoder.encode('!<arch>\n');
+
+    // BSD extended filename: #1/<length> indicates the filename is embedded
+    // in the first <length> bytes of the data section
+    const longName = 'very_long_filename_that_exceeds_16_chars.txt';
+    const nameLength = longName.length;
+    const content = encoder.encode('Hello');
+
+    // Header with #1/<length> format
+    const headerName = `#1/${nameLength}`.padEnd(16, ' ');
+    const timestamp = '0           ';
+    const owner = '0     ';
+    const group = '0     ';
+    const mode = '100644  ';
+    // Size includes the filename length + actual content
+    const totalSize = nameLength + content.length;
+    const size = totalSize.toString().padEnd(10, ' ');
+    const fileMagic = '`\n';
+
+    const header = headerName + timestamp + owner + group + mode + size + fileMagic;
+    const headerBytes = encoder.encode(header);
+    const nameBytes = encoder.encode(longName);
+
+    // Total: magic + header + extended name + content
+    const buffer = new ArrayBuffer(magic.length + headerBytes.length + nameLength + content.length);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+
+    view.set(magic, offset);
+    offset += magic.length;
+    view.set(headerBytes, offset);
+    offset += headerBytes.length;
+    view.set(nameBytes, offset);
+    offset += nameLength;
+    view.set(content, offset);
+
+    const entries = parseArHeaders(buffer);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe(longName);
+  });
+
+  it('throws on invalid file header magic', () => {
+    const encoder = new TextEncoder();
+    const magic = encoder.encode('!<arch>\n');
+
+    // Create header with invalid file magic (should be `\n)
+    const name = 'test.txt/       ';
+    const timestamp = '0           ';
+    const owner = '0     ';
+    const group = '0     ';
+    const mode = '100644  ';
+    const size = '5         ';
+    const badFileMagic = 'XX'; // Invalid - should be `\n
+
+    const header = name + timestamp + owner + group + mode + size + badFileMagic;
+    const headerBytes = encoder.encode(header);
+    const content = encoder.encode('hello');
+
+    const buffer = new ArrayBuffer(magic.length + headerBytes.length + content.length);
+    const view = new Uint8Array(buffer);
+    view.set(magic, 0);
+    view.set(headerBytes, magic.length);
+    view.set(content, magic.length + headerBytes.length);
+
+    expect(() => parseArHeaders(buffer)).toThrow(/Invalid AR file header.*bad magic/);
+  });
+});
+
+// ============================================================================
+// TAR Parser Edge Cases
+// ============================================================================
+
+describe('parseTar edge cases', () => {
+  it('handles UStar format with prefix for long paths', () => {
+    const encoder = new TextEncoder();
+    const content = encoder.encode('File content');
+
+    // Create a TAR header with UStar format (prefix field at offset 345)
+    const header = new Uint8Array(512);
+
+    // Short name (bytes 0-99) - just the filename part
+    const nameBytes = encoder.encode('deeply_nested_file.txt');
+    header.set(nameBytes.slice(0, 100), 0);
+
+    // Mode (bytes 100-107)
+    header.set(encoder.encode('0000644\0'), 100);
+
+    // UID/GID (bytes 108-123)
+    header.set(encoder.encode('0000000\0'), 108);
+    header.set(encoder.encode('0000000\0'), 116);
+
+    // Size (bytes 124-135)
+    const sizeStr = content.length.toString(8).padStart(11, '0') + '\0';
+    header.set(encoder.encode(sizeStr), 124);
+
+    // Mtime (bytes 136-147)
+    header.set(encoder.encode('00000000000\0'), 136);
+
+    // Type flag (byte 156) - '0' for regular file
+    header[156] = 0x30;
+
+    // UStar magic (bytes 257-262) - "ustar\0"
+    header.set(encoder.encode('ustar\0'), 257);
+
+    // UStar version (bytes 263-264) - "00"
+    header.set(encoder.encode('00'), 263);
+
+    // Prefix (bytes 345-499) - the directory path prefix
+    const prefix = 'very/long/directory/path/that/exceeds/100/chars';
+    header.set(encoder.encode(prefix), 345);
+
+    // Calculate checksum
+    for (let i = 148; i < 156; i++) header[i] = 0x20;
+    let checksum = 0;
+    for (let i = 0; i < 512; i++) checksum += header[i];
+    const checksumStr = checksum.toString(8).padStart(6, '0') + '\0 ';
+    header.set(encoder.encode(checksumStr), 148);
+
+    // Build archive
+    const dataBlock = new Uint8Array(512);
+    dataBlock.set(content, 0);
+    const endBlocks = new Uint8Array(1024);
+
+    const archive = new Uint8Array(512 + 512 + 1024);
+    archive.set(header, 0);
+    archive.set(dataBlock, 512);
+    archive.set(endBlocks, 1024);
+
+    const entries = parseTar(archive.buffer);
+
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe(prefix + '/deeply_nested_file.txt');
+  });
+
+  it('skips directory entries (type flag 5)', () => {
+    const encoder = new TextEncoder();
+    const content = encoder.encode('File in dir');
+
+    // Create a directory entry (type 5)
+    const dirHeader = new Uint8Array(512);
+    dirHeader.set(encoder.encode('mydir/'), 0);
+    dirHeader.set(encoder.encode('0000755\0'), 100);
+    dirHeader.set(encoder.encode('0000000\0'), 108);
+    dirHeader.set(encoder.encode('0000000\0'), 116);
+    dirHeader.set(encoder.encode('00000000000\0'), 124); // size 0
+    dirHeader.set(encoder.encode('00000000000\0'), 136);
+    dirHeader[156] = 0x35; // '5' = directory
+
+    for (let i = 148; i < 156; i++) dirHeader[i] = 0x20;
+    let checksum = 0;
+    for (let i = 0; i < 512; i++) checksum += dirHeader[i];
+    dirHeader.set(encoder.encode(checksum.toString(8).padStart(6, '0') + '\0 '), 148);
+
+    // Create a file entry
+    const fileHeader = new Uint8Array(512);
+    fileHeader.set(encoder.encode('mydir/file.txt'), 0);
+    fileHeader.set(encoder.encode('0000644\0'), 100);
+    fileHeader.set(encoder.encode('0000000\0'), 108);
+    fileHeader.set(encoder.encode('0000000\0'), 116);
+    const sizeStr = content.length.toString(8).padStart(11, '0') + '\0';
+    fileHeader.set(encoder.encode(sizeStr), 124);
+    fileHeader.set(encoder.encode('00000000000\0'), 136);
+    fileHeader[156] = 0x30; // '0' = regular file
+
+    for (let i = 148; i < 156; i++) fileHeader[i] = 0x20;
+    checksum = 0;
+    for (let i = 0; i < 512; i++) checksum += fileHeader[i];
+    fileHeader.set(encoder.encode(checksum.toString(8).padStart(6, '0') + '\0 '), 148);
+
+    const dataBlock = new Uint8Array(512);
+    dataBlock.set(content, 0);
+    const endBlocks = new Uint8Array(1024);
+
+    const archive = new Uint8Array(512 + 512 + 512 + 1024);
+    archive.set(dirHeader, 0);
+    archive.set(fileHeader, 512);
+    archive.set(dataBlock, 1024);
+    archive.set(endBlocks, 1536);
+
+    const entries = parseTar(archive.buffer);
+
+    // Should only have the file, not the directory
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe('mydir/file.txt');
+  });
+
+  it('skips GNU long name entries (type flag L)', () => {
+    const encoder = new TextEncoder();
+    const fileContent = encoder.encode('Actual file content');
+
+    // Create a GNU long name entry (type L)
+    // This entry's data contains the actual filename for the next entry
+    const longName = 'a'.repeat(200) + '.txt'; // Longer than 100 chars
+    const longNameEntry = new Uint8Array(512);
+    longNameEntry.set(encoder.encode('././@LongLink'), 0);
+    longNameEntry.set(encoder.encode('0000644\0'), 100);
+    longNameEntry.set(encoder.encode('0000000\0'), 108);
+    longNameEntry.set(encoder.encode('0000000\0'), 116);
+    const longNameSizeStr = (longName.length + 1).toString(8).padStart(11, '0') + '\0';
+    longNameEntry.set(encoder.encode(longNameSizeStr), 124);
+    longNameEntry.set(encoder.encode('00000000000\0'), 136);
+    longNameEntry[156] = 0x4c; // 'L' = long name
+
+    for (let i = 148; i < 156; i++) longNameEntry[i] = 0x20;
+    let checksum = 0;
+    for (let i = 0; i < 512; i++) checksum += longNameEntry[i];
+    longNameEntry.set(encoder.encode(checksum.toString(8).padStart(6, '0') + '\0 '), 148);
+
+    // Long name data block
+    const longNameData = new Uint8Array(512);
+    longNameData.set(encoder.encode(longName + '\0'), 0);
+
+    // The actual file entry (with truncated name)
+    const fileHeader = new Uint8Array(512);
+    fileHeader.set(encoder.encode('truncated_name.txt'), 0);
+    fileHeader.set(encoder.encode('0000644\0'), 100);
+    fileHeader.set(encoder.encode('0000000\0'), 108);
+    fileHeader.set(encoder.encode('0000000\0'), 116);
+    const fileSizeStr = fileContent.length.toString(8).padStart(11, '0') + '\0';
+    fileHeader.set(encoder.encode(fileSizeStr), 124);
+    fileHeader.set(encoder.encode('00000000000\0'), 136);
+    fileHeader[156] = 0x30; // '0' = regular file
+
+    for (let i = 148; i < 156; i++) fileHeader[i] = 0x20;
+    checksum = 0;
+    for (let i = 0; i < 512; i++) checksum += fileHeader[i];
+    fileHeader.set(encoder.encode(checksum.toString(8).padStart(6, '0') + '\0 '), 148);
+
+    const fileData = new Uint8Array(512);
+    fileData.set(fileContent, 0);
+    const endBlocks = new Uint8Array(1024);
+
+    const archive = new Uint8Array(512 + 512 + 512 + 512 + 1024);
+    archive.set(longNameEntry, 0);
+    archive.set(longNameData, 512);
+    archive.set(fileHeader, 1024);
+    archive.set(fileData, 1536);
+    archive.set(endBlocks, 2048);
+
+    const entries = parseTar(archive.buffer);
+
+    // Should have the file but not the long name metadata entry
+    // Current implementation skips 'L' type entries
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe('truncated_name.txt');
+  });
+
+  it('skips POSIX extended headers (type flags x and g)', () => {
+    const encoder = new TextEncoder();
+    const fileContent = encoder.encode('File content');
+
+    // Create a local extended header (type x)
+    const extHeader = new Uint8Array(512);
+    extHeader.set(encoder.encode('PaxHeaders/file.txt'), 0);
+    extHeader.set(encoder.encode('0000644\0'), 100);
+    extHeader.set(encoder.encode('0000000\0'), 108);
+    extHeader.set(encoder.encode('0000000\0'), 116);
+    // Extended header data (e.g., "19 path=long/path\n")
+    const extData = '19 path=somepath\n';
+    const extSizeStr = extData.length.toString(8).padStart(11, '0') + '\0';
+    extHeader.set(encoder.encode(extSizeStr), 124);
+    extHeader.set(encoder.encode('00000000000\0'), 136);
+    extHeader[156] = 0x78; // 'x' = local extended header
+
+    for (let i = 148; i < 156; i++) extHeader[i] = 0x20;
+    let checksum = 0;
+    for (let i = 0; i < 512; i++) checksum += extHeader[i];
+    extHeader.set(encoder.encode(checksum.toString(8).padStart(6, '0') + '\0 '), 148);
+
+    const extDataBlock = new Uint8Array(512);
+    extDataBlock.set(encoder.encode(extData), 0);
+
+    // The actual file entry
+    const fileHeader = new Uint8Array(512);
+    fileHeader.set(encoder.encode('actual_file.txt'), 0);
+    fileHeader.set(encoder.encode('0000644\0'), 100);
+    fileHeader.set(encoder.encode('0000000\0'), 108);
+    fileHeader.set(encoder.encode('0000000\0'), 116);
+    const fileSizeStr = fileContent.length.toString(8).padStart(11, '0') + '\0';
+    fileHeader.set(encoder.encode(fileSizeStr), 124);
+    fileHeader.set(encoder.encode('00000000000\0'), 136);
+    fileHeader[156] = 0x30; // '0' = regular file
+
+    for (let i = 148; i < 156; i++) fileHeader[i] = 0x20;
+    checksum = 0;
+    for (let i = 0; i < 512; i++) checksum += fileHeader[i];
+    fileHeader.set(encoder.encode(checksum.toString(8).padStart(6, '0') + '\0 '), 148);
+
+    const fileData = new Uint8Array(512);
+    fileData.set(fileContent, 0);
+    const endBlocks = new Uint8Array(1024);
+
+    const archive = new Uint8Array(512 + 512 + 512 + 512 + 1024);
+    archive.set(extHeader, 0);
+    archive.set(extDataBlock, 512);
+    archive.set(fileHeader, 1024);
+    archive.set(fileData, 1536);
+    archive.set(endBlocks, 2048);
+
+    const entries = parseTar(archive.buffer);
+
+    // Should only have the regular file, not the extended header
+    expect(entries).toHaveLength(1);
+    expect(entries[0].name).toBe('actual_file.txt');
+    expect(new TextDecoder().decode(entries[0].data)).toBe('File content');
   });
 });

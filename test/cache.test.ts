@@ -7,6 +7,7 @@ import { CacheManager } from '../src/cache/cache';
 
 class MockCache implements Cache {
   private store = new Map<string, Response>();
+  private headers = new Map<string, Headers>();
 
   async match(request: RequestInfo | URL): Promise<Response | undefined> {
     const url = request instanceof Request ? request.url : request.toString();
@@ -19,6 +20,8 @@ class MockCache implements Cache {
     const url = request instanceof Request ? request.url : request.toString();
     // Clone the response to store it
     this.store.set(url, response.clone());
+    // Store headers for verification in tests
+    this.headers.set(url, new Headers(response.headers));
   }
 
   // Required Cache interface methods (not used in tests)
@@ -32,6 +35,7 @@ class MockCache implements Cache {
 
   async delete(request: RequestInfo | URL): Promise<boolean> {
     const url = request instanceof Request ? request.url : request.toString();
+    this.headers.delete(url);
     return this.store.delete(url);
   }
 
@@ -46,10 +50,16 @@ class MockCache implements Cache {
   // Helper for tests
   clear(): void {
     this.store.clear();
+    this.headers.clear();
   }
 
   size(): number {
     return this.store.size;
+  }
+
+  // Get stored headers for a URL (for TTL verification)
+  getStoredHeaders(url: string): Headers | undefined {
+    return this.headers.get(url);
   }
 }
 
@@ -293,19 +303,69 @@ describe('CacheManager', () => {
   // ==========================================================================
 
   describe('TTL configuration', () => {
-    it('uses default TTL of 86400 seconds', () => {
-      // This is tested indirectly - the CacheManager accepts TTL in constructor
+    it('uses default TTL of 86400 seconds for content', async () => {
       const manager = new CacheManager(mockCache as unknown as Cache);
+      await manager.setPackagesFile('owner', 'repo', 'amd64', 'content');
 
-      // The TTL is private, but we can verify the behavior indirectly
-      expect(manager).toBeDefined();
+      const headers = mockCache.getStoredHeaders('https://reprox.internal/packages/owner/repo/amd64');
+      expect(headers?.get('Cache-Control')).toBe('public, max-age=86400');
     });
 
-    it('accepts custom TTL', () => {
+    it('uses 300 second TTL for release ID caching', async () => {
+      const manager = new CacheManager(mockCache as unknown as Cache);
+      await manager.setLatestReleaseId('owner', 'repo', 12345);
+
+      const headers = mockCache.getStoredHeaders('https://reprox.internal/latest/owner/repo');
+      expect(headers?.get('Cache-Control')).toBe('public, max-age=300');
+    });
+
+    it('uses custom TTL for content when provided', async () => {
       const customTtl = 3600;
       const manager = new CacheManager(mockCache as unknown as Cache, customTtl);
+      await manager.setPackagesFile('owner', 'repo', 'amd64', 'content');
 
-      expect(manager).toBeDefined();
+      const headers = mockCache.getStoredHeaders('https://reprox.internal/packages/owner/repo/amd64');
+      expect(headers?.get('Cache-Control')).toBe('public, max-age=3600');
+    });
+
+    it('custom TTL does not affect release ID TTL', async () => {
+      const manager = new CacheManager(mockCache as unknown as Cache, 7200);
+      await manager.setLatestReleaseId('owner', 'repo', 12345);
+
+      // Release ID should still use 300s TTL regardless of custom content TTL
+      const headers = mockCache.getStoredHeaders('https://reprox.internal/latest/owner/repo');
+      expect(headers?.get('Cache-Control')).toBe('public, max-age=300');
+    });
+  });
+
+  // ==========================================================================
+  // Edge Case Tests
+  // ==========================================================================
+
+  describe('getLatestReleaseId edge cases', () => {
+    it('returns null for non-numeric cached values', async () => {
+      // Manually put a non-numeric value in cache
+      const request = new Request('https://reprox.internal/latest/owner/repo');
+      await mockCache.put(request, new Response('not-a-number'));
+
+      const result = await cacheManager.getLatestReleaseId('owner', 'repo');
+      expect(result).toBeNull();
+    });
+
+    it('returns null for empty string cached value', async () => {
+      const request = new Request('https://reprox.internal/latest/owner/repo');
+      await mockCache.put(request, new Response(''));
+
+      const result = await cacheManager.getLatestReleaseId('owner', 'repo');
+      expect(result).toBeNull();
+    });
+
+    it('parses float values as integers', async () => {
+      const request = new Request('https://reprox.internal/latest/owner/repo');
+      await mockCache.put(request, new Response('12345.67'));
+
+      const result = await cacheManager.getLatestReleaseId('owner', 'repo');
+      expect(result).toBe(12345);
     });
   });
 });

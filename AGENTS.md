@@ -52,11 +52,23 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - `src/signing/gpg.ts` - OpenPGP signing (cleartext and detached)
 - `src/github/api.ts` - GitHub API client for release info
 - `src/cache/cache.ts` - Cache API wrapper with release ID validation
+- `src/lib/xz.ts` - XZ decompression wrapper for Workers (see below)
 
 ### Design Patterns
 - **Range Requests**: Only fetches package headers to minimize bandwidth
 - **Release ID Caching**: Cache invalidation triggered by new GitHub releases
 - **Architecture Detection**: Parses architecture from filename patterns (amd64, arm64, i386, armhf, all)
+
+### Cloudflare Workers Considerations
+
+**Static WASM Imports**: Workers blocks dynamic `WebAssembly.instantiate()` for security (similar to `eval()`). WASM modules must be imported statically at build time.
+
+**XZ Decompression** (`src/lib/xz.ts`): Some .deb packages use `control.tar.xz` compression. The xzwasm library embeds WASM as base64 and uses dynamic instantiation, which doesn't work in Workers. Our solution:
+1. `scripts/extract-xz-wasm.cjs` extracts the WASM binary from xzwasm on `npm install` (postinstall hook)
+2. `src/lib/xz.ts` imports the WASM statically and patches `XzReadableStream._moduleInstance` before use
+3. The extracted `src/lib/xz-decompress.wasm` is gitignored (auto-generated)
+
+If xzwasm is updated, running `npm install` will automatically extract the new WASM version.
 
 ## Environment Variables
 
@@ -68,10 +80,15 @@ Optional secrets (set via `wrangler secret put`):
 
 ## Testing
 
-Tests use Vitest with Node environment. Test files are in `test/` directory.
+Tests use Vitest with `@cloudflare/vitest-pool-workers` to run in a Workers-like environment. Test files are in `test/` directory.
 
 ```bash
 npm run test                    # Run all tests
 npx vitest run parsers.test.ts  # Run specific test file
 npx vitest --watch              # Watch mode
+
+# Run with integration tests (requires GitHub token for API access)
+GITHUB_TOKEN=<token> RUN_INTEGRATION_TESTS=true npm test
 ```
+
+Integration tests in `test/integration/` fetch real packages from GitHub releases to verify parsing works with actual .deb and .rpm files.

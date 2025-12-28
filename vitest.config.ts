@@ -1,10 +1,21 @@
-import { defineConfig } from 'vitest/config';
+import { defineWorkersConfig } from '@cloudflare/vitest-pool-workers/config';
 
-export default defineConfig({
+export default defineWorkersConfig({
   test: {
-    environment: 'node',
     globals: true,
     include: ['test/**/*.test.ts'],
     testTimeout: 30000, // 30s for integration tests with network requests
+    poolOptions: {
+      workers: {
+        wrangler: { configPath: './wrangler.toml' },
+        miniflare: {
+          bindings: {
+            // Pass environment variables to Workers runtime for integration tests
+            GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+            RUN_INTEGRATION_TESTS: process.env.RUN_INTEGRATION_TESTS,
+          },
+        },
+      },
+    },
   },
 });

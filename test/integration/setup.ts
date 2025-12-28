@@ -1,4 +1,5 @@
 import { describe } from 'vitest';
+import { env } from 'cloudflare:test';
 import type { GitHubAsset } from '../../src/types';
 
 // =============================================================================
@@ -25,10 +26,18 @@ export const TEST_REPOS: TestRepo[] = [
 // Test Environment
 // =============================================================================
 
-export const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+// Access bindings from Workers environment (injected via vitest.config.ts)
+interface TestEnv {
+  GITHUB_TOKEN?: string;
+  RUN_INTEGRATION_TESTS?: string;
+}
+
+const testEnv = env as TestEnv;
+
+export const GITHUB_TOKEN = testEnv.GITHUB_TOKEN;
 
 export const INTEGRATION_ENABLED =
-  process.env.RUN_INTEGRATION_TESTS === 'true' && !!GITHUB_TOKEN;
+  testEnv.RUN_INTEGRATION_TESTS === 'true' && !!GITHUB_TOKEN;
 
 export const describeIntegration = INTEGRATION_ENABLED
   ? describe

@@ -2,7 +2,7 @@ import type { DebianControlData } from '../types';
 import { parseArHeaders, extractArFile, findArEntry } from './ar';
 import { parseTar, findTarEntry } from './tar';
 import { decompress as decompressZstd } from 'fzstd';
-import { XzReadableStream } from 'xz-decompress';
+import { decompressXz } from '../lib/xz';
 import { readStreamToBuffer } from '../utils/streams';
 
 /**
@@ -49,7 +49,12 @@ export async function parseDebBufferAsync(buffer: ArrayBuffer): Promise<DebianCo
   }
 
   // Parse tar and find control file
-  const tarEntries = parseTar(controlTarData.buffer as ArrayBuffer);
+  // Use slice to handle case where controlTarData is a view into a larger buffer
+  const tarBuffer = controlTarData.buffer.slice(
+    controlTarData.byteOffset,
+    controlTarData.byteOffset + controlTarData.byteLength
+  );
+  const tarEntries = parseTar(tarBuffer);
   const controlFile = findTarEntry(tarEntries, 'control');
 
   if (!controlFile) {
@@ -74,14 +79,10 @@ async function decompressGzipAsync(data: Uint8Array): Promise<Uint8Array> {
 }
 
 /**
- * Decompress XZ data using xz-decompress library (WASM-based).
- * Uses streaming API similar to DecompressionStream.
+ * Decompress XZ data using static WASM import (Cloudflare Workers compatible).
  */
 async function decompressXzAsync(data: Uint8Array): Promise<Uint8Array> {
-  const compressedStream = new Blob([data]).stream();
-  const decompressedStream = new XzReadableStream(compressedStream);
-
-  return readStreamToBuffer(decompressedStream);
+  return decompressXz(data);
 }
 
 /**

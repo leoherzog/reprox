@@ -319,4 +319,264 @@ describe('parseRpmBuffer', () => {
     expect(result.files).toEqual([]);
     expect(result.changelog).toEqual([]);
   });
+
+  it('throws on invalid signature header magic', () => {
+    const lead = createRpmLead();
+
+    // Create invalid signature header (wrong magic)
+    const badSigHeader = new Uint8Array(32);
+    badSigHeader[0] = 0xFF; // Invalid magic
+    badSigHeader[1] = 0xFF;
+    badSigHeader[2] = 0xFF;
+
+    const buffer = new ArrayBuffer(lead.length + badSigHeader.length);
+    const view = new Uint8Array(buffer);
+    view.set(lead, 0);
+    view.set(badSigHeader, lead.length);
+
+    expect(() => parseRpmBuffer(buffer)).toThrow(/Invalid RPM header magic/);
+  });
+
+  it('throws on invalid main header magic', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+
+    // Create invalid main header (wrong magic)
+    const badMainHeader = new Uint8Array(32);
+    badMainHeader[0] = 0xFF; // Invalid magic
+    badMainHeader[1] = 0xFF;
+    badMainHeader[2] = 0xFF;
+
+    const totalSize = lead.length + sigHeader.length + sigPadding + badMainHeader.length;
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(badMainHeader, offset);
+
+    expect(() => parseRpmBuffer(buffer)).toThrow(/Invalid RPM header magic/);
+  });
+});
+
+// ============================================================================
+// buildFileList Tests (via parseRpmBuffer)
+// ============================================================================
+
+describe('parseRpmBuffer file list handling', () => {
+  const RPMTAG_BASENAMES = 1117;
+  const RPMTAG_DIRNAMES = 1118;
+  const RPMTAG_DIRINDEXES = 1116;
+
+  it('builds file list from BASENAMES, DIRNAMES, and DIRINDEXES', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+    const mainHeader = createRpmHeader([
+      { tag: 1000, type: 6, value: 'files-pkg' },
+      { tag: 1001, type: 6, value: '1.0.0' },
+      { tag: 1002, type: 6, value: '1' },
+      { tag: 1022, type: 6, value: 'x86_64' },
+      { tag: RPMTAG_DIRNAMES, type: 8, value: ['/usr/bin/', '/usr/lib/'] },
+      { tag: RPMTAG_BASENAMES, type: 8, value: ['myapp', 'libmyapp.so'] },
+      { tag: RPMTAG_DIRINDEXES, type: 4, value: [0, 1] },
+    ]);
+
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+    const totalSize = lead.length + sigHeader.length + sigPadding + mainHeader.length;
+
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(mainHeader, offset);
+
+    const result = parseRpmBuffer(buffer);
+
+    expect(result.files).toHaveLength(2);
+    expect(result.files).toContain('/usr/bin/myapp');
+    expect(result.files).toContain('/usr/lib/libmyapp.so');
+  });
+
+  it('returns empty file list when BASENAMES is empty', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+    const mainHeader = createRpmHeader([
+      { tag: 1000, type: 6, value: 'no-files-pkg' },
+      { tag: 1001, type: 6, value: '1.0.0' },
+      { tag: 1002, type: 6, value: '1' },
+    ]);
+
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+    const totalSize = lead.length + sigHeader.length + sigPadding + mainHeader.length;
+
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(mainHeader, offset);
+
+    const result = parseRpmBuffer(buffer);
+    expect(result.files).toEqual([]);
+  });
+
+  it('uses default dirname when DIRINDEXES is missing', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+    const mainHeader = createRpmHeader([
+      { tag: 1000, type: 6, value: 'no-dirindex-pkg' },
+      { tag: 1001, type: 6, value: '1.0.0' },
+      { tag: 1002, type: 6, value: '1' },
+      { tag: RPMTAG_DIRNAMES, type: 8, value: ['/opt/app/'] },
+      { tag: RPMTAG_BASENAMES, type: 8, value: ['config.ini'] },
+      // DIRINDEXES intentionally missing - should default to index 0
+    ]);
+
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+    const totalSize = lead.length + sigHeader.length + sigPadding + mainHeader.length;
+
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(mainHeader, offset);
+
+    const result = parseRpmBuffer(buffer);
+    expect(result.files).toEqual(['/opt/app/config.ini']);
+  });
+});
+
+// ============================================================================
+// buildChangelog Tests (via parseRpmBuffer)
+// ============================================================================
+
+describe('parseRpmBuffer changelog handling', () => {
+  const RPMTAG_CHANGELOGTIME = 1080;
+  const RPMTAG_CHANGELOGNAME = 1081;
+  const RPMTAG_CHANGELOGTEXT = 1082;
+
+  it('builds changelog from time, name, and text arrays', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+    const mainHeader = createRpmHeader([
+      { tag: 1000, type: 6, value: 'changelog-pkg' },
+      { tag: 1001, type: 6, value: '1.0.0' },
+      { tag: 1002, type: 6, value: '1' },
+      { tag: RPMTAG_CHANGELOGTIME, type: 4, value: [1700000000, 1699900000] },
+      { tag: RPMTAG_CHANGELOGNAME, type: 8, value: ['John Doe <john@example.com>', 'Jane Doe <jane@example.com>'] },
+      { tag: RPMTAG_CHANGELOGTEXT, type: 8, value: ['- Fixed bug #123', '- Initial release'] },
+    ]);
+
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+    const totalSize = lead.length + sigHeader.length + sigPadding + mainHeader.length;
+
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(mainHeader, offset);
+
+    const result = parseRpmBuffer(buffer);
+
+    expect(result.changelog).toHaveLength(2);
+    expect(result.changelog[0]).toEqual({
+      time: 1700000000,
+      author: 'John Doe <john@example.com>',
+      text: '- Fixed bug #123',
+    });
+    expect(result.changelog[1]).toEqual({
+      time: 1699900000,
+      author: 'Jane Doe <jane@example.com>',
+      text: '- Initial release',
+    });
+  });
+
+  it('caps changelog at 10 entries', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+
+    // Create 15 changelog entries
+    const times: number[] = [];
+    const names: string[] = [];
+    const texts: string[] = [];
+    for (let i = 0; i < 15; i++) {
+      times.push(1700000000 + i);
+      names.push(`Author ${i} <author${i}@example.com>`);
+      texts.push(`- Change ${i}`);
+    }
+
+    const mainHeader = createRpmHeader([
+      { tag: 1000, type: 6, value: 'many-changelogs-pkg' },
+      { tag: 1001, type: 6, value: '1.0.0' },
+      { tag: 1002, type: 6, value: '1' },
+      { tag: RPMTAG_CHANGELOGTIME, type: 4, value: times },
+      { tag: RPMTAG_CHANGELOGNAME, type: 8, value: names },
+      { tag: RPMTAG_CHANGELOGTEXT, type: 8, value: texts },
+    ]);
+
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+    const totalSize = lead.length + sigHeader.length + sigPadding + mainHeader.length;
+
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(mainHeader, offset);
+
+    const result = parseRpmBuffer(buffer);
+
+    // Should be capped at 10
+    expect(result.changelog).toHaveLength(10);
+    expect(result.changelog[0].author).toBe('Author 0 <author0@example.com>');
+    expect(result.changelog[9].author).toBe('Author 9 <author9@example.com>');
+  });
+
+  it('returns empty changelog when arrays are missing', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+    const mainHeader = createRpmHeader([
+      { tag: 1000, type: 6, value: 'no-changelog-pkg' },
+      { tag: 1001, type: 6, value: '1.0.0' },
+      { tag: 1002, type: 6, value: '1' },
+    ]);
+
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+    const totalSize = lead.length + sigHeader.length + sigPadding + mainHeader.length;
+
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(mainHeader, offset);
+
+    const result = parseRpmBuffer(buffer);
+    expect(result.changelog).toEqual([]);
+  });
 });

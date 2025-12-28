@@ -1,9 +1,10 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   generatePackageEntry,
   generatePackagesFile,
   filterDebAssets,
   filterByArchitecture,
+  fetchDebMetadata,
 } from '../../src/generators/packages';
 import type { PackageEntry, DebianControlData, AssetLike } from '../../src/types';
 
@@ -300,16 +301,125 @@ describe('filterByArchitecture', () => {
     expect(result.map(a => a.name)).toContain('pkg_1.0.0_all.deb');
   });
 
-  it('returns empty when no matches', () => {
+  it('returns only "all" packages when specific arch not found', () => {
     const result = filterByArchitecture(assets, 'ppc64');
 
-    // Only 'all' packages match
+    // Only 'all' packages match when specific arch doesn't exist
     expect(result).toHaveLength(1);
     expect(result[0].name).toBe('pkg_1.0.0_all.deb');
+  });
+
+  it('returns empty when no matches and no "all" packages exist', () => {
+    const assetsNoAll: AssetLike[] = [
+      { name: 'pkg_1.0.0_amd64.deb', size: 1000, browser_download_url: 'url1' },
+      { name: 'pkg_1.0.0_arm64.deb', size: 2000, browser_download_url: 'url2' },
+    ];
+    const result = filterByArchitecture(assetsNoAll, 'ppc64');
+
+    expect(result).toHaveLength(0);
   });
 
   it('handles empty array', () => {
     const result = filterByArchitecture([], 'amd64');
     expect(result).toHaveLength(0);
+  });
+});
+
+// ============================================================================
+// fetchDebMetadata Tests
+// ============================================================================
+
+describe('fetchDebMetadata', () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('throws descriptive error on HTTP failure', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+    } as Response);
+
+    await expect(fetchDebMetadata('https://example.com/test.deb'))
+      .rejects.toThrow('Failed to fetch .deb: 403 Forbidden');
+  });
+
+  it('throws on 404 not found', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false,
+      status: 404,
+      statusText: 'Not Found',
+    } as Response);
+
+    await expect(fetchDebMetadata('https://example.com/test.deb'))
+      .rejects.toThrow('Failed to fetch .deb: 404 Not Found');
+  });
+
+  it('includes auth token in headers when provided', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+    } as Response);
+
+    try {
+      await fetchDebMetadata('https://example.com/test.deb', 'test-token');
+    } catch {
+      // Expected to fail, we just check the fetch call
+    }
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://example.com/test.deb',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'token test-token',
+        }),
+      })
+    );
+  });
+
+  it('sends Range header for partial content', async () => {
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Error',
+    } as Response);
+
+    try {
+      await fetchDebMetadata('https://example.com/test.deb');
+    } catch {
+      // Expected to fail
+    }
+
+    expect(fetch).toHaveBeenCalledWith(
+      'https://example.com/test.deb',
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Range: 'bytes=0-65535',
+        }),
+        redirect: 'follow',
+      })
+    );
+  });
+
+  it('accepts 206 Partial Content as success', async () => {
+    // Create a minimal valid .deb-like buffer (will fail parsing but proves status handling)
+    vi.mocked(fetch).mockResolvedValue({
+      ok: false, // 206 has ok=false in some implementations
+      status: 206,
+      statusText: 'Partial Content',
+      arrayBuffer: () => Promise.resolve(new ArrayBuffer(100)),
+    } as Response);
+
+    // Will fail on parsing, but should not fail on status check
+    await expect(fetchDebMetadata('https://example.com/test.deb'))
+      .rejects.not.toThrow('Failed to fetch .deb: 206');
   });
 });
