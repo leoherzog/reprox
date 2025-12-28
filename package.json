@@ -1,6 +1,7 @@
 {
   "name": "reprox",
   "version": "1.0.0",
+  "type": "module",
   "description": "Serverless APT/RPM repository gateway using Cloudflare Workers",
   "main": "src/index.ts",
   "scripts": {
@@ -10,7 +11,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "openpgp": "^5.11.0"
+    "fzstd": "^0.1.1",
+    "openpgp": "^5.11.0",
+    "xz-decompress": "^0.2.3"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20241205.0",

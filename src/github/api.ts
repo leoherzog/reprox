@@ -36,6 +36,9 @@ export class GitHubClient {
       if (response.status === 404) {
         throw new Error(`Repository ${owner}/${repo} not found or has no releases`);
       }
+      if (response.status === 403 || response.status === 429) {
+        throw new Error(`GitHub API rate limit exceeded`);
+      }
       throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
     }
 

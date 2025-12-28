@@ -78,8 +78,8 @@ export function generateReleaseFile(
 }
 
 /**
- * Format date in Release file format
- * Example: "Sat, 01 Jan 2024 00:00:00 UTC"
+ * Format date in Release file format (RFC 7231 HTTP-date)
+ * Example: "Sat, 01 Jan 2024 00:00:00 GMT"
  */
 function formatReleaseDate(date: Date): string {
   const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
@@ -93,7 +93,7 @@ function formatReleaseDate(date: Date): string {
   const minutes = date.getUTCMinutes().toString().padStart(2, '0');
   const seconds = date.getUTCSeconds().toString().padStart(2, '0');
 
-  return `${dayName}, ${day} ${month} ${year} ${hours}:${minutes}:${seconds} UTC`;
+  return `${dayName}, ${day} ${month} ${year} ${hours}:${minutes}:${seconds} GMT`;
 }
 
 

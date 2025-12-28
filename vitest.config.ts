@@ -5,5 +5,6 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     include: ['test/**/*.test.ts'],
+    testTimeout: 30000, // 30s for integration tests with network requests
   },
 });

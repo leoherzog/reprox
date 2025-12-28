@@ -1,6 +1,8 @@
 import type { DebianControlData } from '../types';
 import { parseArHeaders, extractArFile, findArEntry } from './ar';
 import { parseTar, findTarEntry } from './tar';
+import { decompress as decompressZstd } from 'fzstd';
+import { XzReadableStream } from 'xz-decompress';
 
 /**
  * Debian Package Parser
@@ -36,16 +38,9 @@ export async function parseDebBufferAsync(buffer: ArrayBuffer): Promise<DebianCo
   if (controlEntry.name.endsWith('.gz')) {
     controlTarData = await decompressGzipAsync(controlArchiveData);
   } else if (controlEntry.name.endsWith('.xz')) {
-    // XZ is not natively supported in Workers - would need a library like lzma-native
-    throw new Error(
-      'XZ-compressed .deb packages are not supported. ' +
-      'Most packages use gzip compression which is supported.'
-    );
+    controlTarData = await decompressXzAsync(controlArchiveData);
   } else if (controlEntry.name.endsWith('.zst')) {
-    throw new Error(
-      'Zstandard-compressed .deb packages are not supported. ' +
-      'Most packages use gzip compression which is supported.'
-    );
+    controlTarData = decompressZstdData(controlArchiveData);
   } else if (controlEntry.name === 'control.tar') {
     controlTarData = controlArchiveData; // Uncompressed
   } else {
@@ -93,6 +88,42 @@ async function decompressGzipAsync(data: Uint8Array): Promise<Uint8Array> {
   }
 
   return result;
+}
+
+/**
+ * Decompress XZ data using xz-decompress library (WASM-based).
+ * Uses streaming API similar to DecompressionStream.
+ */
+async function decompressXzAsync(data: Uint8Array): Promise<Uint8Array> {
+  const compressedStream = new Blob([data]).stream();
+  const decompressedStream = new XzReadableStream(compressedStream);
+
+  const chunks: Uint8Array[] = [];
+  const reader = decompressedStream.getReader();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+
+  // Concatenate chunks into single buffer
+  const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
+  const result = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    result.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return result;
+}
+
+/**
+ * Decompress Zstandard data using fzstd library.
+ */
+function decompressZstdData(data: Uint8Array): Uint8Array {
+  return decompressZstd(data);
 }
 
 /**

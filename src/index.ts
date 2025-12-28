@@ -171,7 +171,7 @@ export default {
 /**
  * Parse URL path into route information
  */
-function parseRoute(pathname: string): RouteInfo {
+export function parseRoute(pathname: string): RouteInfo {
   const parts = pathname.split('/').filter(Boolean);
 
   const route: RouteInfo = {
