@@ -15,6 +15,7 @@
 import type { RpmPackageEntry, RpmHeaderData, AssetLike } from '../types';
 import { sha256, gzipCompress } from '../utils/crypto';
 import { extractRpmMetadata, extractRpmArchFromFilename } from '../parsers/rpm';
+import { escapeXml } from '../utils/xml';
 
 /**
  * Metadata file info for repomd.xml generation
@@ -199,28 +200,6 @@ ${changelogXml}
 }
 
 /**
- * Escape special XML characters
- */
-function escapeXml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
-
-/**
- * Fetch and parse an RPM file to extract metadata
- */
-export async function fetchRpmMetadata(
-  downloadUrl: string,
-  githubToken?: string
-): Promise<RpmHeaderData> {
-  return extractRpmMetadata(downloadUrl, githubToken);
-}
-
-/**
  * Build an RpmPackageEntry from a GitHub asset
  * Note: We don't calculate checksum since it requires full download
  */
@@ -228,7 +207,7 @@ export async function buildRpmPackageEntry(
   asset: AssetLike,
   githubToken?: string
 ): Promise<RpmPackageEntry> {
-  const headerData = await fetchRpmMetadata(asset.browser_download_url, githubToken);
+  const headerData = await extractRpmMetadata(asset.browser_download_url, githubToken);
 
   // Override arch from filename if header doesn't have it
   if (!headerData.arch || headerData.arch === '') {

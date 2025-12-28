@@ -137,25 +137,25 @@ export default {
           return handleRepomdAsc(route, github, cache, env, ctx);
 
         case 'primary':
-          return handlePrimary(route, github, cache, env, ctx);
+          return handleRpmXml(route, github, cache, env, ctx, 'primary', false);
 
         case 'primary-gz':
-          return handlePrimaryGz(route, github, cache, env, ctx);
+          return handleRpmXml(route, github, cache, env, ctx, 'primary', true);
 
         case 'filelists':
-          return handleFilelists(route, github, cache, env, ctx);
+          return handleRpmXml(route, github, cache, env, ctx, 'filelists', false);
 
         case 'filelists-gz':
-          return handleFilelistsGz(route, github, cache, env, ctx);
+          return handleRpmXml(route, github, cache, env, ctx, 'filelists', true);
 
         case 'other':
-          return handleOther(route, github, cache, env, ctx);
+          return handleRpmXml(route, github, cache, env, ctx, 'other', false);
 
         case 'other-gz':
-          return handleOtherGz(route, github, cache, env, ctx);
+          return handleRpmXml(route, github, cache, env, ctx, 'other', true);
 
         case 'rpm-binary':
-          return handleRpmBinaryRedirect(route, github);
+          return handleBinaryRedirect(route, github, 'rpm');
 
         default:
           return new Response('Not Found', { status: 404 });
@@ -487,7 +487,7 @@ async function validateAndRefreshCache(
 
     if (needsRefresh) {
       // Regenerate all cached content
-      await generateAndCacheAll(route, latestRelease, cache, env, ctx);
+      await generateAndCacheAll(route, latestRelease, cache, env);
     }
   } catch (error) {
     console.error('Background cache validation failed:', error);
@@ -557,8 +557,7 @@ async function generateAndCacheAll(
   route: RouteInfo,
   latestRelease: { id: number; tag_name: string; assets: { name: string; size: number; browser_download_url: string }[] },
   cache: CacheManager,
-  env: Env,
-  _ctx: ExecutionContext
+  env: Env
 ): Promise<void> {
   const { owner, repo, component } = route;
 
@@ -782,23 +781,25 @@ async function generatePackagesContent(
  */
 async function handleBinaryRedirect(
   route: RouteInfo,
-  github: GitHubClient
+  github: GitHubClient,
+  packageType: 'deb' | 'rpm' = 'deb'
 ): Promise<Response> {
   const { owner, repo, filename } = route;
+  const typeName = packageType === 'deb' ? 'Asset' : 'RPM package';
 
   try {
     const release = await github.getLatestRelease(owner, repo);
     const asset = release.assets.find(a => a.name === filename);
 
     if (!asset) {
-      return new Response(`Asset "${filename}" not found in latest release`, { status: 404 });
+      return new Response(`${typeName} not found: ${filename}`, { status: 404 });
     }
 
     // 302 redirect to GitHub's CDN - offloads bandwidth from Worker
     return Response.redirect(asset.browser_download_url, 302);
   } catch (error) {
-    console.error('Binary redirect failed:', error);
-    return new Response('Asset not found', { status: 404 });
+    console.error(`${typeName} redirect failed:`, error);
+    return new Response(`${typeName} not found`, { status: 404 });
   }
 }
 
@@ -885,111 +886,56 @@ async function createRpmXmlResponse(
 }
 
 /**
- * Handle primary.xml request - uncompressed RPM package metadata
+ * Build RPM package entries from assets
  */
-async function handlePrimary(
+async function buildRpmPackages(
+  assets: { name: string; size: number; browser_download_url: string }[],
+  githubToken?: string
+): Promise<RpmPackageEntry[]> {
+  const rpmAssets = filterRpmAssets(assets);
+
+  const entries = await Promise.all(
+    rpmAssets.map(async (asset) => {
+      try {
+        return await buildRpmPackageEntry(asset, githubToken);
+      } catch (error) {
+        console.error(`Failed to process ${asset.name}:`, error);
+        return null;
+      }
+    })
+  );
+
+  return entries.filter((e): e is RpmPackageEntry => e !== null);
+}
+
+/**
+ * Generate all RPM XML metadata from packages
+ */
+function generateRpmXmlMetadata(packages: RpmPackageEntry[]): CachedRpmMetadata {
+  return {
+    primaryXml: generatePrimaryXml(packages),
+    filelistsXml: generateFilelistsXml(packages),
+    otherXml: generateOtherXml(packages),
+  };
+}
+
+type RpmXmlType = 'primary' | 'filelists' | 'other';
+
+/**
+ * Handle RPM XML metadata requests (primary.xml, filelists.xml, other.xml)
+ */
+async function handleRpmXml(
   route: RouteInfo,
   github: GitHubClient,
   cache: CacheManager,
   env: Env,
-  ctx: ExecutionContext
+  ctx: ExecutionContext,
+  xmlType: RpmXmlType,
+  compressed: boolean
 ): Promise<Response> {
   const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
-  return createRpmXmlResponse(metadata.primaryXml, false);
-}
-
-/**
- * Handle primary.xml.gz request - compressed RPM package metadata
- */
-async function handlePrimaryGz(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<Response> {
-  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
-  return createRpmXmlResponse(metadata.primaryXml, true);
-}
-
-/**
- * Handle filelists.xml request - uncompressed file listings
- */
-async function handleFilelists(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<Response> {
-  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
-  return createRpmXmlResponse(metadata.filelistsXml, false);
-}
-
-/**
- * Handle filelists.xml.gz request - compressed file listings
- */
-async function handleFilelistsGz(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<Response> {
-  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
-  return createRpmXmlResponse(metadata.filelistsXml, true);
-}
-
-/**
- * Handle other.xml request - uncompressed changelog data
- */
-async function handleOther(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<Response> {
-  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
-  return createRpmXmlResponse(metadata.otherXml, false);
-}
-
-/**
- * Handle other.xml.gz request - compressed changelog data
- */
-async function handleOtherGz(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<Response> {
-  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
-  return createRpmXmlResponse(metadata.otherXml, true);
-}
-
-/**
- * Handle RPM package binary download - redirect to GitHub
- */
-async function handleRpmBinaryRedirect(
-  route: RouteInfo,
-  github: GitHubClient
-): Promise<Response> {
-  const { owner, repo, filename } = route;
-
-  try {
-    const latestRelease = await github.getLatestRelease(owner, repo);
-    const asset = latestRelease.assets.find(a => a.name === filename);
-
-    if (!asset) {
-      return new Response(`RPM package not found: ${filename}`, { status: 404 });
-    }
-
-    return Response.redirect(asset.browser_download_url, 302);
-  } catch (error) {
-    console.error('RPM binary redirect failed:', error);
-    return new Response('RPM package not found', { status: 404 });
-  }
+  const xmlContent = metadata[`${xmlType}Xml` as keyof CachedRpmMetadata];
+  return createRpmXmlResponse(xmlContent, compressed);
 }
 
 /**
@@ -1036,38 +982,20 @@ async function getCachedRpmMetadata(
 
   // No cache - generate fresh content
   const latestRelease = await github.getLatestRelease(owner, repo);
-  const rpmAssets = filterRpmAssets(latestRelease.assets);
-
-  // Build package entries in parallel
-  const entries = await Promise.all(
-    rpmAssets.map(async (asset) => {
-      try {
-        return await buildRpmPackageEntry(asset, env.GITHUB_TOKEN);
-      } catch (error) {
-        console.error(`Failed to process ${asset.name}:`, error);
-        return null;
-      }
-    })
-  );
-
-  const packages = entries.filter((e): e is RpmPackageEntry => e !== null);
-
-  // Generate all XML content
-  const primaryXml = generatePrimaryXml(packages);
-  const filelistsXml = generateFilelistsXml(packages);
-  const otherXml = generateOtherXml(packages);
+  const packages = await buildRpmPackages(latestRelease.assets, env.GITHUB_TOKEN);
+  const metadata = generateRpmXmlMetadata(packages);
 
   // Cache in background
   ctx.waitUntil(
     Promise.all([
-      cache.setRpmPrimaryXml(owner, repo, primaryXml),
-      cache.setRpmFilelistsXml(owner, repo, filelistsXml),
-      cache.setRpmOtherXml(owner, repo, otherXml),
+      cache.setRpmPrimaryXml(owner, repo, metadata.primaryXml),
+      cache.setRpmFilelistsXml(owner, repo, metadata.filelistsXml),
+      cache.setRpmOtherXml(owner, repo, metadata.otherXml),
       cache.setLatestReleaseId(owner, repo, latestRelease.id),
     ])
   );
 
-  return { primaryXml, filelistsXml, otherXml };
+  return metadata;
 }
 
 /**
@@ -1086,29 +1014,13 @@ async function validateAndRefreshRpmCache(
     const needsRefresh = await cache.needsRefresh(owner, repo, latestRelease.id);
 
     if (needsRefresh) {
-      const rpmAssets = filterRpmAssets(latestRelease.assets);
-
-      const entries = await Promise.all(
-        rpmAssets.map(async (asset) => {
-          try {
-            return await buildRpmPackageEntry(asset, env.GITHUB_TOKEN);
-          } catch (error) {
-            console.error(`Failed to process ${asset.name}:`, error);
-            return null;
-          }
-        })
-      );
-
-      const packages = entries.filter((e): e is RpmPackageEntry => e !== null);
-
-      const primaryXml = generatePrimaryXml(packages);
-      const filelistsXml = generateFilelistsXml(packages);
-      const otherXml = generateOtherXml(packages);
+      const packages = await buildRpmPackages(latestRelease.assets, env.GITHUB_TOKEN);
+      const metadata = generateRpmXmlMetadata(packages);
 
       await Promise.all([
-        cache.setRpmPrimaryXml(owner, repo, primaryXml),
-        cache.setRpmFilelistsXml(owner, repo, filelistsXml),
-        cache.setRpmOtherXml(owner, repo, otherXml),
+        cache.setRpmPrimaryXml(owner, repo, metadata.primaryXml),
+        cache.setRpmFilelistsXml(owner, repo, metadata.filelistsXml),
+        cache.setRpmOtherXml(owner, repo, metadata.otherXml),
         cache.setLatestReleaseId(owner, repo, latestRelease.id),
       ]);
     }

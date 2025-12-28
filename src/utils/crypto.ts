@@ -5,6 +5,8 @@
  * Note: MD5 is NOT supported by Web Crypto API.
  */
 
+import { readStreamToBuffer } from './streams';
+
 /**
  * Calculate SHA256 hash of data (string, Uint8Array, or ArrayBuffer)
  */
@@ -40,28 +42,5 @@ export async function gzipCompress(data: string | Uint8Array): Promise<Uint8Arra
   const blob = new Blob([input]);
   const stream = blob.stream().pipeThrough(cs);
 
-  const chunks: Uint8Array[] = [];
-  const reader = stream.getReader();
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-
-  return concatUint8Arrays(chunks);
-}
-
-/**
- * Concatenate multiple Uint8Arrays into one
- */
-function concatUint8Arrays(arrays: Uint8Array[]): Uint8Array {
-  const totalLength = arrays.reduce((acc, arr) => acc + arr.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const arr of arrays) {
-    result.set(arr, offset);
-    offset += arr.length;
-  }
-  return result;
+  return readStreamToBuffer(stream);
 }

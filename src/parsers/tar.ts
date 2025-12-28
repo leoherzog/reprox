@@ -12,6 +12,7 @@ import type { TarEntry } from '../types';
  */
 
 const TAR_BLOCK_SIZE = 512;
+const textDecoder = new TextDecoder('utf-8');
 
 /**
  * Parse a tar archive and extract file entries
@@ -19,7 +20,6 @@ const TAR_BLOCK_SIZE = 512;
  */
 export function parseTar(buffer: ArrayBuffer): TarEntry[] {
   const view = new Uint8Array(buffer);
-  const decoder = new TextDecoder('utf-8');
   const entries: TarEntry[] = [];
 
   let offset = 0;
@@ -44,7 +44,7 @@ export function parseTar(buffer: ArrayBuffer): TarEntry[] {
     }
 
     // Handle prefix for UStar format (longer paths)
-    const magic = decoder.decode(headerBlock.slice(257, 262));
+    const magic = textDecoder.decode(headerBlock.slice(257, 262));
     let fullName = name;
     if (magic === 'ustar') {
       const prefix = extractTarString(headerBlock, 345, 155);
@@ -84,8 +84,7 @@ function extractTarString(header: Uint8Array, offset: number, length: number): s
   const bytes = header.slice(offset, offset + length);
   let end = bytes.indexOf(0);
   if (end === -1) end = length;
-  const decoder = new TextDecoder('utf-8');
-  return decoder.decode(bytes.slice(0, end)).trim();
+  return textDecoder.decode(bytes.slice(0, end)).trim();
 }
 
 /**

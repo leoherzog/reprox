@@ -3,6 +3,7 @@ import { parseArHeaders, extractArFile, findArEntry } from './ar';
 import { parseTar, findTarEntry } from './tar';
 import { decompress as decompressZstd } from 'fzstd';
 import { XzReadableStream } from 'xz-decompress';
+import { readStreamToBuffer } from '../utils/streams';
 
 /**
  * Debian Package Parser
@@ -69,25 +70,7 @@ async function decompressGzipAsync(data: Uint8Array): Promise<Uint8Array> {
   const blob = new Blob([data]);
   const stream = blob.stream().pipeThrough(ds);
 
-  const chunks: Uint8Array[] = [];
-  const reader = stream.getReader();
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-
-  // Concatenate chunks into single buffer
-  const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  return result;
+  return readStreamToBuffer(stream);
 }
 
 /**
@@ -98,25 +81,7 @@ async function decompressXzAsync(data: Uint8Array): Promise<Uint8Array> {
   const compressedStream = new Blob([data]).stream();
   const decompressedStream = new XzReadableStream(compressedStream);
 
-  const chunks: Uint8Array[] = [];
-  const reader = decompressedStream.getReader();
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-
-  // Concatenate chunks into single buffer
-  const totalLength = chunks.reduce((acc, chunk) => acc + chunk.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-
-  return result;
+  return readStreamToBuffer(decompressedStream);
 }
 
 /**

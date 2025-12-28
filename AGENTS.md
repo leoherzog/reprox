@@ -30,15 +30,28 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - **Common**: `/{owner}/{repo}/public.key`
 
 ### Key Modules
-- `src/parsers/ar.ts` - AR archive format (container for .deb files)
-- `src/parsers/tar.ts` - TAR archive format (contains control files)
-- `src/parsers/deb.ts` - Debian package metadata extraction
-- `src/parsers/rpm.ts` - RPM header parsing with binary tag structure
-- `src/generators/packages.ts` - APT Packages file generation
-- `src/generators/release.ts` - APT Release/InRelease generation
-- `src/generators/repodata.ts` - RPM primary.xml, filelists.xml, other.xml generation
+
+**Parsers** (`src/parsers/`)
+- `ar.ts` - AR archive format (container for .deb files)
+- `tar.ts` - TAR archive format (contains control files)
+- `deb.ts` - Debian package metadata extraction
+- `rpm.ts` - RPM header parsing with binary tag structure
+
+**Generators** (`src/generators/`)
+- `packages.ts` - APT Packages file generation
+- `release.ts` - APT Release/InRelease generation
+- `repodata.ts` - RPM primary.xml, filelists.xml, other.xml generation
+
+**Utilities** (`src/utils/`)
+- `crypto.ts` - SHA256 hashing and gzip compression (Web Crypto API)
+- `streams.ts` - Stream reading utilities (`readStreamToBuffer`, `concatUint8Arrays`)
+- `architectures.ts` - Architecture detection from filenames (Debian and RPM)
+- `xml.ts` - XML character escaping
+
+**Other**
 - `src/signing/gpg.ts` - OpenPGP signing (cleartext and detached)
-- `src/utils/crypto.ts` - SHA256 hashing and gzip compression using Web Crypto API
+- `src/github/api.ts` - GitHub API client for release info
+- `src/cache/cache.ts` - Cache API wrapper with release ID validation
 
 ### Design Patterns
 - **Range Requests**: Only fetches package headers to minimize bandwidth
@@ -48,7 +61,8 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 ## Environment Variables
 
 Optional secrets (set via `wrangler secret put`):
-- `GPG_PRIVATE_KEY` - Armored GPG private key for repository signing
+- `GPG_PRIVATE_KEY` - Armored GPG private key for repository signing (public key is auto-extracted)
+- `GPG_PUBLIC_KEY` - Armored GPG public key (optional override, normally extracted from private key)
 - `GITHUB_TOKEN` - GitHub personal access token for higher API rate limits
 - `CACHE_TTL` - Cache TTL in seconds for content (default: 86400). Release IDs use a 5-minute TTL for freshness checks.
 

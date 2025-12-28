@@ -1,4 +1,8 @@
 import type { RpmHeaderData, RpmChangelogEntry } from '../types';
+import { extractRpmArchFromFilename } from '../utils/architectures';
+
+// Re-export for backward compatibility
+export { extractRpmArchFromFilename };
 
 /**
  * RPM Package Parser
@@ -67,9 +71,8 @@ const RPM_TYPE = {
   I18NSTRING: 9,
 } as const;
 
-// Range request size for RPM (headers with file lists can be larger)
-// Increase to 256KB to capture file lists and changelogs
-const MIN_RANGE_SIZE = 262144; // 256KB
+// Range request size for RPM headers (file lists can be larger)
+const RANGE_REQUEST_SIZE = 262144; // 256KB
 
 /**
  * Extract metadata from an RPM package URL using Range Request.
@@ -79,7 +82,7 @@ export async function extractRpmMetadata(
   githubToken?: string
 ): Promise<RpmHeaderData> {
   const headers: HeadersInit = {
-    Range: `bytes=0-${MIN_RANGE_SIZE - 1}`,
+    Range: `bytes=0-${RANGE_REQUEST_SIZE - 1}`,
     Accept: 'application/octet-stream',
   };
 
@@ -330,20 +333,3 @@ function readNullTerminatedString(bytes: Uint8Array, offset: number): string {
   return decoder.decode(bytes.slice(offset, end));
 }
 
-/**
- * Get RPM architecture from filename
- */
-export function extractRpmArchFromFilename(filename: string): string {
-  // RPM filenames: name-version-release.arch.rpm
-  const match = filename.match(/\.([^.]+)\.rpm$/);
-  if (match) {
-    const arch = match[1];
-    // Normalize architecture names
-    if (arch === 'x86_64' || arch === 'amd64') return 'x86_64';
-    if (arch === 'aarch64' || arch === 'arm64') return 'aarch64';
-    if (arch === 'i686' || arch === 'i386') return 'i686';
-    if (arch === 'noarch') return 'noarch';
-    return arch;
-  }
-  return 'x86_64';
-}

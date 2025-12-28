@@ -72,16 +72,6 @@ export interface DebianControlData {
 }
 
 /**
- * Cached package metadata
- */
-export interface CachedMetadata {
-  releaseId: number;
-  tagName: string;
-  packages: PackageEntry[];
-  generatedAt: string;
-}
-
-/**
  * Single package entry for Packages file
  */
 export interface PackageEntry {

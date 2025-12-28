@@ -1,4 +1,8 @@
 import type { GitHubRelease, GitHubAsset } from '../types';
+import { extractArchFromFilename } from '../utils/architectures';
+
+// Re-export for backward compatibility
+export { extractArchFromFilename };
 
 const GITHUB_API_BASE = 'https://api.github.com';
 
@@ -44,29 +48,6 @@ export class GitHubClient {
 
     return response.json();
   }
-}
-
-/**
- * Determine architecture from asset filename.
- * Used to categorize .deb files by target architecture.
- */
-export function extractArchFromFilename(filename: string): string {
-  const patterns: [RegExp, string][] = [
-    [/[_.-](amd64|x86_64|x64)[_.-]/i, 'amd64'],
-    [/[_.-](arm64|aarch64)[_.-]/i, 'arm64'],
-    [/[_.-](i386|i686|x86)[_.-](?!64)/i, 'i386'],
-    [/[_.-](armhf|armv7)[_.-]/i, 'armhf'],
-    [/[_.-]all[_.-]/i, 'all'],
-  ];
-
-  for (const [pattern, arch] of patterns) {
-    if (pattern.test(filename)) {
-      return arch;
-    }
-  }
-
-  // Default to amd64 if no pattern matches
-  return 'amd64';
 }
 
 /**

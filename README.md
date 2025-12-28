@@ -37,13 +37,15 @@ sudo tee /etc/yum.repos.d/{repo}.repo << EOF
 name={repo} from GitHub via Reprox
 baseurl=https://reprox.dev/{owner}/{repo}
 enabled=1
-gpgcheck=1
-gpgkey=https://reprox.dev/{owner}/{repo}/public.key
+gpgcheck=0
 repo_gpgcheck=1
+gpgkey=https://reprox.dev/{owner}/{repo}/public.key
 EOF
 
 sudo dnf install {package}
 ```
+
+Note: `gpgcheck=0` disables individual package signature verification because Reprox redirects downloads to GitHub without re-signing. Package integrity is still verified via checksums in the signed repository metadata (`repo_gpgcheck=1`).
 
 Replace `{owner}`, `{repo}`, and `{package}` with your GitHub repository details and package name.
 
@@ -53,9 +55,6 @@ You're free to fork and run your own instance on Cloudflare Workers:
 
 ```bash
 git clone https://github.com/leoherzog/reprox.git && cd reprox && npm install
-
-# Create KV namespace and update wrangler.toml with the ID
-wrangler kv:namespace create CACHE
 
 # Generate and add a signing key
 gpg --quick-gen-key "Reprox" rsa4096 sign never
