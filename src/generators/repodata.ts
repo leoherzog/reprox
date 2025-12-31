@@ -24,13 +24,16 @@ export interface RepomdFileInfo {
   primary: { xml: string; gz: Uint8Array };
   filelists: { xml: string; gz: Uint8Array };
   other: { xml: string; gz: Uint8Array };
+  timestamp: number; // Unix timestamp from GitHub release for consistency
 }
 
 /**
  * Generate repomd.xml content referencing all metadata files
  */
 export async function generateRepomdXml(files: RepomdFileInfo): Promise<string> {
-  const timestamp = Math.floor(Date.now() / 1000);
+  // Use the stable timestamp from the GitHub release to ensure
+  // repomd.xml and repomd.xml.asc have identical content
+  const timestamp = files.timestamp;
 
   // Calculate checksums for all files
   const [primaryChecksum, primaryGzChecksum] = await Promise.all([

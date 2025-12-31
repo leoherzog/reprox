@@ -85,6 +85,18 @@ export class CacheManager {
     return `rpm/${type}/${owner}/${repo}`;
   }
 
+  private rpmTimestampKey(owner: string, repo: string): string {
+    return `rpm/timestamp/${owner}/${repo}`;
+  }
+
+  private rpmRepomdKey(owner: string, repo: string): string {
+    return `rpm/repomd/${owner}/${repo}`;
+  }
+
+  private rpmRepomdAscKey(owner: string, repo: string): string {
+    return `rpm/repomd-asc/${owner}/${repo}`;
+  }
+
   // =============================================================================
   // Debian/APT Package Methods
   // =============================================================================
@@ -234,6 +246,57 @@ export class CacheManager {
    */
   async setRpmOtherXml(owner: string, repo: string, content: string): Promise<void> {
     const key = this.rpmMetadataKey(owner, repo, 'other');
+    await this.putInCache(key, content, this.defaultTtl);
+  }
+
+  /**
+   * Get cached RPM timestamp (for consistent repomd.xml generation)
+   */
+  async getRpmTimestamp(owner: string, repo: string): Promise<number | null> {
+    const key = this.rpmTimestampKey(owner, repo);
+    const value = await this.getFromCache(key);
+    if (!value) return null;
+    const parsed = parseInt(value, 10);
+    return isNaN(parsed) ? null : parsed;
+  }
+
+  /**
+   * Store RPM timestamp
+   */
+  async setRpmTimestamp(owner: string, repo: string, timestamp: number): Promise<void> {
+    const key = this.rpmTimestampKey(owner, repo);
+    await this.putInCache(key, timestamp.toString(), this.defaultTtl);
+  }
+
+  /**
+   * Get cached repomd.xml content
+   */
+  async getRpmRepomd(owner: string, repo: string): Promise<string | null> {
+    const key = this.rpmRepomdKey(owner, repo);
+    return this.getFromCache(key);
+  }
+
+  /**
+   * Store repomd.xml content
+   */
+  async setRpmRepomd(owner: string, repo: string, content: string): Promise<void> {
+    const key = this.rpmRepomdKey(owner, repo);
+    await this.putInCache(key, content, this.defaultTtl);
+  }
+
+  /**
+   * Get cached repomd.xml.asc signature
+   */
+  async getRpmRepomdAsc(owner: string, repo: string): Promise<string | null> {
+    const key = this.rpmRepomdAscKey(owner, repo);
+    return this.getFromCache(key);
+  }
+
+  /**
+   * Store repomd.xml.asc signature
+   */
+  async setRpmRepomdAsc(owner: string, repo: string, content: string): Promise<void> {
+    const key = this.rpmRepomdAscKey(owner, repo);
     await this.putInCache(key, content, this.defaultTtl);
   }
 }

@@ -21,7 +21,7 @@ import {
   filterRpmAssets,
 } from './generators/repodata';
 import type { RepomdFileInfo } from './generators/repodata';
-import { signCleartext, signDetached, extractPublicKey } from './signing/gpg';
+import { signCleartext, signDetached, signDetachedBinary, extractPublicKey } from './signing/gpg';
 import { gzipCompress, sha256 } from './utils/crypto';
 
 /**
@@ -808,6 +808,89 @@ async function handleBinaryRedirect(
 // =============================================================================
 
 /**
+ * Get or generate repomd.xml and its signature together
+ * This ensures both are consistent (signature matches content)
+ */
+async function getRepomdWithSignature(
+  route: RouteInfo,
+  github: GitHubClient,
+  cache: CacheManager,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<{ repomd: string; signature: string | null }> {
+  const { owner, repo } = route;
+
+  // Check cache first
+  const [cachedRepomd, cachedSignature] = await Promise.all([
+    cache.getRpmRepomd(owner, repo),
+    cache.getRpmRepomdAsc(owner, repo),
+  ]);
+
+  // If we have cached content (and signature if GPG is configured), use it
+  if (cachedRepomd && (cachedSignature || !env.GPG_PRIVATE_KEY)) {
+    // Validate cache in background
+    ctx.waitUntil(validateAndRefreshRepomd(route, github, cache, env, ctx));
+    return { repomd: cachedRepomd, signature: cachedSignature };
+  }
+
+  // Generate fresh content
+  const files = await getRpmMetadataFiles(route, github, cache, env, ctx);
+  const repomdXml = await generateRepomdXml(files);
+
+  // Sign if GPG key is available
+  let signature: string | null = null;
+  if (env.GPG_PRIVATE_KEY) {
+    signature = await signDetachedBinary(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
+  }
+
+  // Cache both together in background
+  ctx.waitUntil(
+    Promise.all([
+      cache.setRpmRepomd(owner, repo, repomdXml),
+      signature ? cache.setRpmRepomdAsc(owner, repo, signature) : Promise.resolve(),
+    ])
+  );
+
+  return { repomd: repomdXml, signature };
+}
+
+/**
+ * Background task to validate and refresh repomd cache if needed
+ */
+async function validateAndRefreshRepomd(
+  route: RouteInfo,
+  github: GitHubClient,
+  cache: CacheManager,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<void> {
+  try {
+    const { owner, repo } = route;
+    const latestRelease = await github.getLatestRelease(owner, repo);
+    const needsRefresh = await cache.needsRefresh(owner, repo, latestRelease.id);
+
+    if (needsRefresh) {
+      // Regenerate repomd and signature
+      const files = await getRpmMetadataFiles(route, github, cache, env, ctx);
+      const repomdXml = await generateRepomdXml(files);
+
+      const cachePromises: Promise<void>[] = [
+        cache.setRpmRepomd(owner, repo, repomdXml),
+      ];
+
+      if (env.GPG_PRIVATE_KEY) {
+        const signature = await signDetachedBinary(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
+        cachePromises.push(cache.setRpmRepomdAsc(owner, repo, signature));
+      }
+
+      await Promise.all(cachePromises);
+    }
+  } catch (error) {
+    console.error('Background repomd cache validation failed:', error);
+  }
+}
+
+/**
  * Handle repomd.xml request - RPM repository metadata index
  */
 async function handleRepomd(
@@ -817,13 +900,9 @@ async function handleRepomd(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  // Get all RPM metadata files
-  const files = await getRpmMetadataFiles(route, github, cache, env, ctx);
+  const { repomd } = await getRepomdWithSignature(route, github, cache, env, ctx);
 
-  // Generate repomd.xml
-  const repomdXml = await generateRepomdXml(files);
-
-  return new Response(repomdXml, {
+  return new Response(repomd, {
     headers: {
       'Content-Type': 'application/xml',
       'Cache-Control': 'public, max-age=300',
@@ -845,12 +924,11 @@ async function handleRepomdAsc(
     return new Response('GPG signing not configured', { status: 404 });
   }
 
-  // Get all RPM metadata files and generate repomd.xml
-  const files = await getRpmMetadataFiles(route, github, cache, env, ctx);
-  const repomdXml = await generateRepomdXml(files);
+  const { signature } = await getRepomdWithSignature(route, github, cache, env, ctx);
 
-  // Sign the repomd.xml
-  const signature = await signDetached(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
+  if (!signature) {
+    return new Response('Signature generation failed', { status: 500 });
+  }
 
   return new Response(signature, {
     headers: {
@@ -909,9 +987,25 @@ async function buildRpmPackages(
 }
 
 /**
+ * RPM XML content (without timestamp)
+ */
+interface RpmXmlContent {
+  primaryXml: string;
+  filelistsXml: string;
+  otherXml: string;
+}
+
+/**
+ * Cached RPM metadata content (includes timestamp)
+ */
+interface CachedRpmMetadata extends RpmXmlContent {
+  timestamp: number; // Unix timestamp from GitHub release
+}
+
+/**
  * Generate all RPM XML metadata from packages
  */
-function generateRpmXmlMetadata(packages: RpmPackageEntry[]): CachedRpmMetadata {
+function generateRpmXmlMetadata(packages: RpmPackageEntry[]): RpmXmlContent {
   return {
     primaryXml: generatePrimaryXml(packages),
     filelistsXml: generateFilelistsXml(packages),
@@ -934,17 +1028,8 @@ async function handleRpmXml(
   compressed: boolean
 ): Promise<Response> {
   const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
-  const xmlContent = metadata[`${xmlType}Xml` as keyof CachedRpmMetadata];
+  const xmlContent = metadata[`${xmlType}Xml` as keyof RpmXmlContent];
   return createRpmXmlResponse(xmlContent, compressed);
-}
-
-/**
- * Cached RPM metadata content
- */
-interface CachedRpmMetadata {
-  primaryXml: string;
-  filelistsXml: string;
-  otherXml: string;
 }
 
 /**
@@ -962,13 +1047,14 @@ async function getCachedRpmMetadata(
   // Check cache first
   const cachedReleaseId = await cache.getLatestReleaseId(owner, repo);
   if (cachedReleaseId) {
-    const [cachedPrimary, cachedFilelists, cachedOther] = await Promise.all([
+    const [cachedPrimary, cachedFilelists, cachedOther, cachedTimestamp] = await Promise.all([
       cache.getRpmPrimaryXml(owner, repo),
       cache.getRpmFilelistsXml(owner, repo),
       cache.getRpmOtherXml(owner, repo),
+      cache.getRpmTimestamp(owner, repo),
     ]);
 
-    if (cachedPrimary && cachedFilelists && cachedOther) {
+    if (cachedPrimary && cachedFilelists && cachedOther && cachedTimestamp) {
       // Validate in background
       ctx.waitUntil(validateAndRefreshRpmCache(route, github, cache, env, ctx));
 
@@ -976,6 +1062,7 @@ async function getCachedRpmMetadata(
         primaryXml: cachedPrimary,
         filelistsXml: cachedFilelists,
         otherXml: cachedOther,
+        timestamp: cachedTimestamp,
       };
     }
   }
@@ -985,17 +1072,21 @@ async function getCachedRpmMetadata(
   const packages = await buildRpmPackages(latestRelease.assets, env.GITHUB_TOKEN);
   const metadata = generateRpmXmlMetadata(packages);
 
+  // Convert GitHub published_at to Unix timestamp
+  const timestamp = Math.floor(new Date(latestRelease.published_at).getTime() / 1000);
+
   // Cache in background
   ctx.waitUntil(
     Promise.all([
       cache.setRpmPrimaryXml(owner, repo, metadata.primaryXml),
       cache.setRpmFilelistsXml(owner, repo, metadata.filelistsXml),
       cache.setRpmOtherXml(owner, repo, metadata.otherXml),
+      cache.setRpmTimestamp(owner, repo, timestamp),
       cache.setLatestReleaseId(owner, repo, latestRelease.id),
     ])
   );
 
-  return metadata;
+  return { ...metadata, timestamp };
 }
 
 /**
@@ -1016,11 +1107,13 @@ async function validateAndRefreshRpmCache(
     if (needsRefresh) {
       const packages = await buildRpmPackages(latestRelease.assets, env.GITHUB_TOKEN);
       const metadata = generateRpmXmlMetadata(packages);
+      const timestamp = Math.floor(new Date(latestRelease.published_at).getTime() / 1000);
 
       await Promise.all([
         cache.setRpmPrimaryXml(owner, repo, metadata.primaryXml),
         cache.setRpmFilelistsXml(owner, repo, metadata.filelistsXml),
         cache.setRpmOtherXml(owner, repo, metadata.otherXml),
+        cache.setRpmTimestamp(owner, repo, timestamp),
         cache.setLatestReleaseId(owner, repo, latestRelease.id),
       ]);
     }
@@ -1052,5 +1145,6 @@ async function getRpmMetadataFiles(
     primary: { xml: metadata.primaryXml, gz: primaryGz },
     filelists: { xml: metadata.filelistsXml, gz: filelistsGz },
     other: { xml: metadata.otherXml, gz: otherGz },
+    timestamp: metadata.timestamp,
   };
 }

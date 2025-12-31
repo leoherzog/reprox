@@ -46,7 +46,8 @@ export async function signCleartext(
 }
 
 /**
- * Create a detached signature (for Release.gpg)
+ * Create a detached text signature (for Release.gpg - APT)
+ * Uses sigclass 0x01 (canonical text) for text file signing
  */
 export async function signDetached(
   content: string,
@@ -69,6 +70,44 @@ export async function signDetached(
   // Create message from text
   const message = await openpgp.createMessage({
     text: content,
+  });
+
+  // Create detached signature
+  const signature = await openpgp.sign({
+    message,
+    signingKeys: privateKey,
+    detached: true,
+    format: 'armored',
+  });
+
+  return signature as string;
+}
+
+/**
+ * Create a detached binary signature (for repomd.xml.asc - RPM/DNF)
+ * Uses sigclass 0x00 (binary) which is required by rpm/dnf
+ */
+export async function signDetachedBinary(
+  content: string,
+  privateKeyArmored: string,
+  passphrase?: string
+): Promise<string> {
+  // Read the private key
+  let privateKey = await openpgp.readPrivateKey({
+    armoredKey: privateKeyArmored,
+  });
+
+  // Decrypt if passphrase provided
+  if (passphrase) {
+    privateKey = await openpgp.decryptKey({
+      privateKey,
+      passphrase,
+    });
+  }
+
+  // Create message as binary data (produces sigclass 0x00)
+  const message = await openpgp.createMessage({
+    binary: new TextEncoder().encode(content),
   });
 
   // Create detached signature
