@@ -152,6 +152,7 @@ export function parseRpmBuffer(buffer: ArrayBuffer): RpmHeaderData {
     packager: headerData[RPMTAG.PACKAGER] as string || '',
     buildTime: headerData[RPMTAG.BUILDTIME] as number || 0,
     sourceRpm: headerData[RPMTAG.SOURCERPM] as string || '',
+    installedSize: headerData[RPMTAG.SIZE] as number || 0,
     requires: headerData[RPMTAG.REQUIRENAME] as string[] || [],
     provides: headerData[RPMTAG.PROVIDENAME] as string[] || [],
     conflicts: headerData[RPMTAG.CONFLICTNAME] as string[] || [],

@@ -133,6 +133,7 @@ export interface RpmHeaderData {
   packager: string;
   buildTime: number;
   sourceRpm: string;
+  installedSize: number; // Size when installed (from RPMTAG_SIZE)
   requires: string[];
   provides: string[];
   conflicts: string[];

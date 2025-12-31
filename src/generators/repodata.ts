@@ -128,7 +128,7 @@ function generatePackageXml(pkg: RpmPackageEntry): string {
     <packager>${escapeXml(headerData.packager || headerData.vendor)}</packager>
     <url>${escapeXml(headerData.url)}</url>
     <time file="${headerData.buildTime}" build="${headerData.buildTime}"/>
-    <size package="${size}" installed="0" archive="0"/>
+    <size package="${size}" installed="${headerData.installedSize}" archive="0"/>
     <location href="Packages/${escapeXml(filename)}"/>
     <format>
       <rpm:license>${escapeXml(headerData.license)}</rpm:license>
