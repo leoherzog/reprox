@@ -299,6 +299,30 @@ export class CacheManager {
     const key = this.rpmRepomdAscKey(owner, repo);
     await this.putInCache(key, content, this.defaultTtl);
   }
+
+  /**
+   * Clear all cached content for a repository
+   */
+  async clearAllCache(owner: string, repo: string): Promise<void> {
+    const keys = [
+      // APT cache keys
+      this.releaseKey(owner, repo),
+      this.inReleaseKey(owner, repo),
+      this.latestReleaseKey(owner, repo),
+      // RPM cache keys
+      this.rpmMetadataKey(owner, repo, 'primary'),
+      this.rpmMetadataKey(owner, repo, 'filelists'),
+      this.rpmMetadataKey(owner, repo, 'other'),
+      this.rpmTimestampKey(owner, repo),
+      this.rpmRepomdKey(owner, repo),
+      this.rpmRepomdAscKey(owner, repo),
+    ];
+
+    // Delete all cached entries
+    await Promise.all(
+      keys.map(key => this.cache.delete(this.createCacheRequest(key)))
+    );
+  }
 }
 
 /**

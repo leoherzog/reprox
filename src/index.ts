@@ -103,6 +103,11 @@ export default {
       const github = new GitHubClient(env.GITHUB_TOKEN);
       const cache = createCacheManager(env.CACHE_TTL);
 
+      // Handle cache invalidation via ?cache=false
+      if (url.searchParams.get('cache') === 'false') {
+        await cache.clearAllCache(route.owner, route.repo);
+      }
+
       // Route handling
       switch (route.type) {
         case 'public-key':
