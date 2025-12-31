@@ -21,7 +21,7 @@ import {
   filterRpmAssets,
 } from './generators/repodata';
 import type { RepomdFileInfo } from './generators/repodata';
-import { signCleartext, signDetached, signDetachedBinary, extractPublicKey } from './signing/gpg';
+import { signCleartext, signDetached, signDetachedBinary, extractPublicKey, getKeyFingerprint } from './signing/gpg';
 import { gzipCompress, sha256 } from './utils/crypto';
 
 /**
@@ -55,9 +55,34 @@ export default {
       // Handle root path - show usage instructions
       if (url.pathname === '/' || url.pathname === '') {
         const baseUrl = `${url.protocol}//${url.host}`;
+
+        // Get fingerprint if GPG key is configured
+        let fingerprint: string | null = null;
+        const gpgKey = env.GPG_PUBLIC_KEY || env.GPG_PRIVATE_KEY;
+        if (gpgKey) {
+          try {
+            fingerprint = await getKeyFingerprint(gpgKey);
+          } catch {
+            // Ignore errors - fingerprint is optional
+          }
+        }
+
+        const aptFingerprintNote = fingerprint
+          ? `  # Optional: verify the key fingerprint before importing\n` +
+            `  # curl -fsSL ${baseUrl}/{owner}/{repo}/public.key | gpg --show-keys\n` +
+            `  # This instance's fingerprint: ${fingerprint}\n\n`
+          : '';
+
+        const rpmFingerprintNote = fingerprint
+          ? `  # When importing the GPG key, verify this instance's fingerprint:\n` +
+            `  # ${fingerprint}\n\n`
+          : '';
+
         return new Response(
-          'Reprox - Serverless APT/RPM Repository Gateway\n\n' +
+          'Reprox - Serverless Github Releases APT/RPM Gateway\n' +
+          'https://github.com/leoherzog/reprox\n\n' +
           '=== APT (Debian/Ubuntu) ===\n\n' +
+          aptFingerprintNote +
           '  # Import the signing key\n' +
           `  curl -fsSL ${baseUrl}/{owner}/{repo}/public.key | \\\n` +
           '    sudo gpg --dearmor -o /etc/apt/keyrings/{repo}.gpg\n\n' +
@@ -76,6 +101,7 @@ export default {
           '  repo_gpgcheck=1\n' +
           `  gpgkey=${baseUrl}/{owner}/{repo}/public.key\n` +
           '  EOF\n\n' +
+          rpmFingerprintNote +
           '  sudo dnf install {package}\n',
           {
             status: 200,

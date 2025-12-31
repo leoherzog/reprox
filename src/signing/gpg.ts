@@ -132,3 +132,20 @@ export async function extractPublicKey(privateKeyArmored: string): Promise<strin
   const publicKey = privateKey.toPublic();
   return publicKey.armor();
 }
+
+/**
+ * Get key fingerprint from a private or public key
+ * Returns fingerprint in human-readable format (uppercase, space-separated groups of 4)
+ */
+export async function getKeyFingerprint(armoredKey: string): Promise<string> {
+  let key;
+  if (armoredKey.includes('PRIVATE KEY')) {
+    key = await openpgp.readPrivateKey({ armoredKey });
+  } else {
+    key = await openpgp.readKey({ armoredKey });
+  }
+
+  const fingerprint = key.getFingerprint().toUpperCase();
+  // Format as groups of 4 characters separated by spaces
+  return fingerprint.match(/.{1,4}/g)?.join(' ') ?? fingerprint;
+}

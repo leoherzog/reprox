@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import * as openpgp from 'openpgp';
-import { signCleartext, signDetached, extractPublicKey } from '../src/signing/gpg';
+import { signCleartext, signDetached, extractPublicKey, getKeyFingerprint } from '../src/signing/gpg';
 
 // ============================================================================
 // Test Key Generation
@@ -196,6 +196,42 @@ describe('extractPublicKey', () => {
     const keyObj = await openpgp.readKey({ armoredKey: publicKey });
     expect(keyObj).toBeDefined();
     expect(keyObj.isPrivate()).toBe(false);
+  });
+});
+
+// ============================================================================
+// getKeyFingerprint Tests
+// ============================================================================
+
+describe('getKeyFingerprint', () => {
+  it('extracts fingerprint from private key', async () => {
+    const fingerprint = await getKeyFingerprint(testPrivateKey);
+
+    // Fingerprint should be 40 hex chars (160 bits) with spaces
+    expect(fingerprint).toMatch(/^[A-F0-9]{4}( [A-F0-9]{4}){9}$/);
+  });
+
+  it('extracts fingerprint from public key', async () => {
+    const fingerprint = await getKeyFingerprint(testPublicKey);
+
+    expect(fingerprint).toMatch(/^[A-F0-9]{4}( [A-F0-9]{4}){9}$/);
+  });
+
+  it('returns same fingerprint for private and public key', async () => {
+    const privateFingerprint = await getKeyFingerprint(testPrivateKey);
+    const publicFingerprint = await getKeyFingerprint(testPublicKey);
+
+    expect(privateFingerprint).toBe(publicFingerprint);
+  });
+
+  it('formats fingerprint with spaces every 4 characters', async () => {
+    const fingerprint = await getKeyFingerprint(testPrivateKey);
+    const groups = fingerprint.split(' ');
+
+    expect(groups).toHaveLength(10);
+    groups.forEach(group => {
+      expect(group).toHaveLength(4);
+    });
   });
 });
 
