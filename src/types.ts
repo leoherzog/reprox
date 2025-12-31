@@ -49,6 +49,7 @@ export interface GitHubAsset {
   size: number;
   browser_download_url: string;
   content_type: string;
+  digest?: string; // SHA256 digest in format "sha256:..."
 }
 
 /**
@@ -156,4 +157,4 @@ export interface RpmPackageEntry {
 /**
  * Minimal asset type for filtering (subset of GitHubAsset)
  */
-export type AssetLike = { name: string; size: number; browser_download_url: string };
+export type AssetLike = { name: string; size: number; browser_download_url: string; digest?: string };

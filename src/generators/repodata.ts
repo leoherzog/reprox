@@ -204,7 +204,7 @@ ${changelogXml}
 
 /**
  * Build an RpmPackageEntry from a GitHub asset
- * Note: We don't calculate checksum since it requires full download
+ * Uses GitHub's digest field for the checksum when available
  */
 export async function buildRpmPackageEntry(
   asset: AssetLike,
@@ -217,11 +217,17 @@ export async function buildRpmPackageEntry(
     headerData.arch = extractRpmArchFromFilename(asset.name);
   }
 
+  // Extract SHA256 from GitHub's digest field (format: "sha256:...")
+  let checksum = '';
+  if (asset.digest?.startsWith('sha256:')) {
+    checksum = asset.digest.slice(7); // Remove "sha256:" prefix
+  }
+
   return {
     headerData,
     filename: asset.name,
     size: asset.size,
-    checksum: '', // Not calculated - would require full download
+    checksum,
     checksumType: 'sha256',
   };
 }
