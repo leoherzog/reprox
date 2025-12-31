@@ -77,6 +77,10 @@ export class CacheManager {
     return `inrelease/${owner}/${repo}`;
   }
 
+  private releaseGpgKey(owner: string, repo: string): string {
+    return `release-gpg/${owner}/${repo}`;
+  }
+
   private latestReleaseKey(owner: string, repo: string): string {
     return `latest/${owner}/${repo}`;
   }
@@ -156,6 +160,22 @@ export class CacheManager {
   async setInReleaseFile(owner: string, repo: string, content: string): Promise<void> {
     const key = this.inReleaseKey(owner, repo);
     await this.putInCache(key, content, this.defaultTtl);
+  }
+
+  /**
+   * Get cached Release.gpg signature
+   */
+  async getReleaseGpgSignature(owner: string, repo: string): Promise<string | null> {
+    const key = this.releaseGpgKey(owner, repo);
+    return this.getFromCache(key);
+  }
+
+  /**
+   * Store Release.gpg signature
+   */
+  async setReleaseGpgSignature(owner: string, repo: string, signature: string): Promise<void> {
+    const key = this.releaseGpgKey(owner, repo);
+    await this.putInCache(key, signature, this.defaultTtl);
   }
 
   // =============================================================================
@@ -308,6 +328,7 @@ export class CacheManager {
       // APT cache keys
       this.releaseKey(owner, repo),
       this.inReleaseKey(owner, repo),
+      this.releaseGpgKey(owner, repo),
       this.latestReleaseKey(owner, repo),
       // RPM cache keys
       this.rpmMetadataKey(owner, repo, 'primary'),

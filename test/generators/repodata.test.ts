@@ -30,8 +30,11 @@ function createRpmHeaderData(overrides: Partial<RpmHeaderData> = {}): RpmHeaderD
     group: 'Development/Tools',
     sourceRpm: 'test-package-1.0.0-1.src.rpm',
     buildTime: 1700000000,
+    installedSize: 1024000,
     requires: [],
     provides: [],
+    conflicts: [],
+    obsoletes: [],
     files: [],
     changelog: [],
     ...overrides,
@@ -67,6 +70,7 @@ async function createRepomdFileInfo(): Promise<RepomdFileInfo> {
       xml: otherXml,
       gz: await gzipCompress(otherXml),
     },
+    timestamp: 1700000000, // Fixed timestamp for deterministic tests
   };
 }
 

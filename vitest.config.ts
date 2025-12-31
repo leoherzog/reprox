@@ -11,8 +11,9 @@ export default defineWorkersConfig({
         miniflare: {
           bindings: {
             // Pass environment variables to Workers runtime for integration tests
-            GITHUB_TOKEN: process.env.GITHUB_TOKEN,
-            RUN_INTEGRATION_TESTS: process.env.RUN_INTEGRATION_TESTS,
+            // Use empty strings as defaults since undefined is rejected
+            GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? '',
+            RUN_INTEGRATION_TESTS: process.env.RUN_INTEGRATION_TESTS ?? '',
           },
         },
       },

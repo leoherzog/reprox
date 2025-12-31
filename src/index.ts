@@ -482,6 +482,19 @@ async function handleReleaseGpg(
 
   const { owner, repo } = route;
 
+  // Check for cached signature first
+  const cachedSignature = await cache.getReleaseGpgSignature(owner, repo);
+  if (cachedSignature) {
+    // Validate in background
+    ctx.waitUntil(validateAndRefreshCache(route, github, cache, env, ctx));
+    return new Response(cachedSignature, {
+      headers: {
+        'Content-Type': 'application/pgp-signature',
+        'Cache-Control': 'public, max-age=300',
+      },
+    });
+  }
+
   // Get or generate Release content
   let releaseContent = await cache.getReleaseFile(owner, repo);
   if (!releaseContent) {
@@ -489,8 +502,9 @@ async function handleReleaseGpg(
     ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseContent));
   }
 
-  // Create detached signature
+  // Create detached signature and cache it
   const signature = await signDetached(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
+  ctx.waitUntil(cache.setReleaseGpgSignature(owner, repo, signature));
 
   return new Response(signature, {
     headers: {
@@ -565,10 +579,11 @@ async function generateReleaseContent(
     ctx.waitUntil(cache.setPackagesFile(owner, repo, arch, content));
   }
 
-  // Build Release config with detected architectures
+  // Build Release config with detected architectures and stable timestamp
   const config = {
     ...defaultReleaseConfig(owner, repo),
     architectures: architectures,
+    date: new Date(latestRelease.published_at),
   };
 
   // Build entries for all architectures
@@ -585,7 +600,7 @@ async function generateReleaseContent(
  */
 async function generateAndCacheAll(
   route: RouteInfo,
-  latestRelease: { id: number; tag_name: string; assets: { name: string; size: number; browser_download_url: string }[] },
+  latestRelease: { id: number; tag_name: string; published_at: string; assets: { name: string; size: number; browser_download_url: string }[] },
   cache: CacheManager,
   env: Env
 ): Promise<void> {
@@ -615,6 +630,7 @@ async function generateAndCacheAll(
   const config = {
     ...defaultReleaseConfig(owner, repo),
     architectures: architectures,
+    date: new Date(latestRelease.published_at),
   };
 
   const entries = await buildReleaseEntries(packagesContentByArch, component);
@@ -626,6 +642,10 @@ async function generateAndCacheAll(
   if (env.GPG_PRIVATE_KEY) {
     const inRelease = await signCleartext(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
     await cache.setInReleaseFile(owner, repo, inRelease);
+
+    // Also cache Release.gpg for consistency
+    const releaseGpg = await signDetached(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
+    await cache.setReleaseGpgSignature(owner, repo, releaseGpg);
   }
 }
 

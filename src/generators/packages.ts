@@ -158,17 +158,17 @@ export async function buildPackageEntry(
   // to match against GitHub release assets. See handleBinaryRedirect() in index.ts.
   const filename = `pool/main/${controlData.package[0]}/${controlData.package}/${asset.name}`;
 
-  // NOTE: SHA256/MD5 checksums are intentionally omitted.
-  // Calculating them would require downloading the entire .deb file, defeating
-  // the purpose of our Range Request architecture (64KB header-only parsing).
-  // Users should configure APT with [allow-insecure=yes] or trust via GPG signing.
-  // The InRelease file IS signed, providing repository-level authenticity.
+  // Extract SHA256 from GitHub's digest field (format: "sha256:...")
+  let sha256 = '';
+  if (asset.digest?.startsWith('sha256:')) {
+    sha256 = asset.digest.slice(7);
+  }
 
   return {
     controlData,
     filename,
     size: asset.size,
-    sha256: '',
+    sha256,
     md5sum: '',
   };
 }
