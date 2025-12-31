@@ -339,6 +339,135 @@ describe('CacheManager', () => {
   });
 
   // ==========================================================================
+  // RPM Repomd Caching Tests
+  // ==========================================================================
+
+  describe('RPM repomd.xml caching', () => {
+    it('stores and retrieves repomd.xml', async () => {
+      const content = '<?xml version="1.0"?><repomd>...</repomd>';
+
+      await cacheManager.setRpmRepomd('owner', 'repo', content);
+      const result = await cacheManager.getRpmRepomd('owner', 'repo');
+
+      expect(result).toBe(content);
+    });
+
+    it('returns null for uncached repomd.xml', async () => {
+      const result = await cacheManager.getRpmRepomd('owner', 'repo');
+
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('RPM repomd.xml.asc caching', () => {
+    it('stores and retrieves repomd.xml.asc signature', async () => {
+      const signature = '-----BEGIN PGP SIGNATURE-----\n...\n-----END PGP SIGNATURE-----';
+
+      await cacheManager.setRpmRepomdAsc('owner', 'repo', signature);
+      const result = await cacheManager.getRpmRepomdAsc('owner', 'repo');
+
+      expect(result).toBe(signature);
+    });
+
+    it('returns null for uncached repomd.xml.asc', async () => {
+      const result = await cacheManager.getRpmRepomdAsc('owner', 'repo');
+
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('RPM timestamp caching', () => {
+    it('stores and retrieves timestamp', async () => {
+      const timestamp = 1700000000;
+
+      await cacheManager.setRpmTimestamp('owner', 'repo', timestamp);
+      const result = await cacheManager.getRpmTimestamp('owner', 'repo');
+
+      expect(result).toBe(timestamp);
+    });
+
+    it('returns null for uncached timestamp', async () => {
+      const result = await cacheManager.getRpmTimestamp('owner', 'repo');
+
+      expect(result).toBeNull();
+    });
+
+    it('handles large timestamps', async () => {
+      const largeTimestamp = 9999999999999;
+
+      await cacheManager.setRpmTimestamp('owner', 'repo', largeTimestamp);
+      const result = await cacheManager.getRpmTimestamp('owner', 'repo');
+
+      expect(result).toBe(largeTimestamp);
+    });
+
+    it('returns null for non-numeric cached values', async () => {
+      const request = new Request('https://reprox.internal/rpm/timestamp/owner/repo');
+      await mockCache.put(request, new Response('not-a-number'));
+
+      const result = await cacheManager.getRpmTimestamp('owner', 'repo');
+      expect(result).toBeNull();
+    });
+  });
+
+  // ==========================================================================
+  // clearAllCache Tests
+  // ==========================================================================
+
+  describe('clearAllCache', () => {
+    it('clears all APT cache entries for a repository', async () => {
+      // Set up cache entries
+      await cacheManager.setReleaseFile('owner', 'repo', 'release content');
+      await cacheManager.setInReleaseFile('owner', 'repo', 'inrelease content');
+      await cacheManager.setReleaseGpgSignature('owner', 'repo', 'gpg sig');
+      await cacheManager.setLatestReleaseId('owner', 'repo', 12345);
+
+      // Clear all cache
+      await cacheManager.clearAllCache('owner', 'repo');
+
+      // Verify all cleared
+      expect(await cacheManager.getReleaseFile('owner', 'repo')).toBeNull();
+      expect(await cacheManager.getInReleaseFile('owner', 'repo')).toBeNull();
+      expect(await cacheManager.getReleaseGpgSignature('owner', 'repo')).toBeNull();
+      expect(await cacheManager.getLatestReleaseId('owner', 'repo')).toBeNull();
+    });
+
+    it('clears all RPM cache entries for a repository', async () => {
+      // Set up cache entries
+      await cacheManager.setRpmPrimaryXml('owner', 'repo', 'primary xml');
+      await cacheManager.setRpmFilelistsXml('owner', 'repo', 'filelists xml');
+      await cacheManager.setRpmOtherXml('owner', 'repo', 'other xml');
+      await cacheManager.setRpmTimestamp('owner', 'repo', 1700000000);
+      await cacheManager.setRpmRepomd('owner', 'repo', 'repomd xml');
+      await cacheManager.setRpmRepomdAsc('owner', 'repo', 'repomd asc');
+
+      // Clear all cache
+      await cacheManager.clearAllCache('owner', 'repo');
+
+      // Verify all cleared
+      expect(await cacheManager.getRpmPrimaryXml('owner', 'repo')).toBeNull();
+      expect(await cacheManager.getRpmFilelistsXml('owner', 'repo')).toBeNull();
+      expect(await cacheManager.getRpmOtherXml('owner', 'repo')).toBeNull();
+      expect(await cacheManager.getRpmTimestamp('owner', 'repo')).toBeNull();
+      expect(await cacheManager.getRpmRepomd('owner', 'repo')).toBeNull();
+      expect(await cacheManager.getRpmRepomdAsc('owner', 'repo')).toBeNull();
+    });
+
+    it('does not affect other repositories', async () => {
+      // Set up cache entries for two repos
+      await cacheManager.setReleaseFile('owner', 'repo1', 'repo1 content');
+      await cacheManager.setReleaseFile('owner', 'repo2', 'repo2 content');
+
+      // Clear only repo1
+      await cacheManager.clearAllCache('owner', 'repo1');
+
+      // Verify repo1 cleared, repo2 still exists
+      expect(await cacheManager.getReleaseFile('owner', 'repo1')).toBeNull();
+      expect(await cacheManager.getReleaseFile('owner', 'repo2')).toBe('repo2 content');
+    });
+  });
+
+  // ==========================================================================
   // Edge Case Tests
   // ==========================================================================
 

@@ -174,16 +174,12 @@ describe('getArchitecturesFromAssets', () => {
 // ============================================================================
 
 describe('GitHubClient', () => {
-  const originalFetch = globalThis.fetch;
-
   beforeEach(() => {
-    // Reset fetch mock before each test
     vi.stubGlobal('fetch', vi.fn());
   });
 
   afterEach(() => {
-    // Restore original fetch after each test
-    globalThis.fetch = originalFetch;
+    vi.unstubAllGlobals();
   });
 
   describe('getLatestRelease', () => {

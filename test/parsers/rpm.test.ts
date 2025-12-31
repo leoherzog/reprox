@@ -222,8 +222,13 @@ describe('extractRpmArchFromFilename', () => {
     });
 
     it('returns whatever segment precedes .rpm (may not be arch)', () => {
-      // Note: version numbers like 1.0.0 will match the last segment
-      // Real RPM filenames should have arch before .rpm
+      // Known limitation: The function extracts the last dot-separated segment before .rpm
+      // without validating it's actually an architecture. For malformed filenames like
+      // 'package-1.0.0.rpm' (missing arch), it returns the version segment '0'.
+      // This is acceptable because real-world RPM filenames always include the architecture
+      // before .rpm (e.g., 'package-1.0.0-1.x86_64.rpm'). Fixing this would require
+      // maintaining a list of valid architectures, which adds complexity for an edge case
+      // that doesn't occur in practice.
       expect(extractRpmArchFromFilename('package-1.0.0.rpm')).toBe('0');
     });
   });

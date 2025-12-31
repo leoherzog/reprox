@@ -18,5 +18,22 @@ export default defineWorkersConfig({
         },
       },
     },
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html', 'lcov'],
+      include: ['src/**/*.ts'],
+      exclude: [
+        'src/**/*.d.ts',
+        'src/types.ts',
+      ],
+      thresholds: {
+        // Set reasonable thresholds based on current coverage
+        // These can be increased as coverage improves
+        statements: 60,
+        branches: 50,
+        functions: 60,
+        lines: 60,
+      },
+    },
   },
 });

@@ -330,14 +330,12 @@ describe('filterByArchitecture', () => {
 // ============================================================================
 
 describe('fetchDebMetadata', () => {
-  const originalFetch = globalThis.fetch;
-
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn());
   });
 
   afterEach(() => {
-    globalThis.fetch = originalFetch;
+    vi.unstubAllGlobals();
   });
 
   it('throws descriptive error on HTTP failure', async () => {
@@ -412,7 +410,7 @@ describe('fetchDebMetadata', () => {
   it('accepts 206 Partial Content as success', async () => {
     // Create a minimal valid .deb-like buffer (will fail parsing but proves status handling)
     vi.mocked(fetch).mockResolvedValue({
-      ok: false, // 206 has ok=false in some implementations
+      ok: true, // 206 is in 200-299 range, so ok=true per Fetch spec
       status: 206,
       statusText: 'Partial Content',
       arrayBuffer: () => Promise.resolve(new ArrayBuffer(100)),
