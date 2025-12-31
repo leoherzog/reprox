@@ -101,3 +101,137 @@ GITHUB_TOKEN=<token> RUN_INTEGRATION_TESTS=true npm test
 ```
 
 Integration tests in `test/integration/` fetch real packages from GitHub releases to verify parsing works with actual .deb and .rpm files.
+
+## Deployment
+
+### Prerequisites
+
+- Node.js 18.0.0 or higher
+- A Cloudflare account (free tier works)
+- `wrangler` CLI (installed via npm as a dev dependency)
+- (Optional) GPG for generating signing keys
+
+### Step-by-Step Deployment
+
+1. **Clone and install dependencies**
+
+   ```bash
+   git clone https://github.com/leoherzog/reprox.git
+   cd reprox
+   npm install
+   ```
+
+   The `postinstall` script automatically extracts the XZ WASM binary from xzwasm for static import (required for Cloudflare Workers).
+
+2. **Authenticate with Cloudflare**
+
+   ```bash
+   npx wrangler login
+   ```
+
+   This opens a browser for OAuth authentication with your Cloudflare account.
+
+3. **Configure worker name (optional)**
+
+   Edit `wrangler.toml` to customize the worker name:
+   ```toml
+   name = "my-reprox-instance"
+   ```
+
+   Default name is `reprox`. The worker will be accessible at `https://{name}.{account-subdomain}.workers.dev`.
+
+4. **Generate and configure GPG signing key**
+
+   Repositories should be GPG-signed for package manager verification:
+
+   ```bash
+   # Generate a new GPG key (no passphrase for simplicity, or use one)
+   gpg --quick-gen-key "My Reprox Instance" rsa4096 sign never
+
+   # Export and set as secret
+   gpg --armor --export-secret-keys "My Reprox Instance" | npx wrangler secret put GPG_PRIVATE_KEY
+
+   # If your key has a passphrase, also set it
+   npx wrangler secret put GPG_PASSPHRASE
+   ```
+
+   Alternatively, import an existing key:
+   ```bash
+   cat /path/to/private-key.asc | npx wrangler secret put GPG_PRIVATE_KEY
+   ```
+
+5. **Configure GitHub token (recommended)**
+
+   A GitHub personal access token increases API rate limits from 60 to 5,000 requests/hour:
+
+   ```bash
+   npx wrangler secret put GITHUB_TOKEN
+   ```
+
+   Create a token at https://github.com/settings/tokens with no special permissions (public repo access only).
+
+6. **Deploy to Cloudflare Workers**
+
+   ```bash
+   npm run deploy
+   ```
+
+   The CLI outputs the worker URL upon successful deployment.
+
+### Secrets Reference
+
+Set secrets using `npx wrangler secret put <NAME>`:
+
+| Secret | Required | Description |
+|--------|----------|-------------|
+| `GPG_PRIVATE_KEY` | Recommended | ASCII-armored GPG private key for repository signing |
+| `GPG_PASSPHRASE` | If key is encrypted | Passphrase for the GPG private key |
+| `GPG_PUBLIC_KEY` | No | Override auto-extracted public key (rarely needed) |
+| `GITHUB_TOKEN` | Recommended | GitHub PAT for higher API rate limits |
+
+### Environment Variables
+
+Set in `wrangler.toml` under `[vars]`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CACHE_TTL` | `86400` | Cache TTL in seconds for repository content (24 hours) |
+
+### Custom Domain Setup
+
+1. Add a custom domain in Cloudflare Workers dashboard → your worker → Triggers → Custom Domains
+2. Or use `wrangler.toml`:
+   ```toml
+   routes = [
+     { pattern = "packages.example.com/*", zone_name = "example.com" }
+   ]
+   ```
+
+### Verifying Deployment
+
+Test that the worker is running:
+
+```bash
+# Should return usage instructions
+curl https://your-worker.workers.dev/
+
+# Test a real repository (replace with an actual GitHub repo with .deb/.rpm releases)
+curl https://your-worker.workers.dev/{owner}/{repo}/public.key
+curl https://your-worker.workers.dev/{owner}/{repo}/dists/stable/InRelease
+```
+
+### Updating
+
+```bash
+git pull
+npm install        # Re-extracts WASM if xzwasm updated
+npm run deploy
+```
+
+### Local Development
+
+```bash
+npm run dev        # Starts local dev server with wrangler
+npm run test       # Run test suite
+npm run typecheck  # TypeScript type checking
+```

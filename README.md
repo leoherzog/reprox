@@ -51,22 +51,67 @@ Replace `{owner}`, `{repo}`, and `{package}` with your GitHub repository details
 
 ## Self-Hosting
 
-You're free to fork and run your own instance on Cloudflare Workers:
+Run your own instance on Cloudflare Workers:
+
+### Prerequisites
+
+- Node.js 18+
+- A [Cloudflare account](https://dash.cloudflare.com/sign-up)
+- GPG (for generating signing keys)
+
+### Quick Start
 
 ```bash
+# Clone and install
 git clone https://github.com/leoherzog/reprox.git && cd reprox && npm install
+
+# Login to Cloudflare
+npx wrangler login
 
 # Generate and add a signing key
 gpg --quick-gen-key "Reprox" rsa4096 sign never
-gpg --armor --export-secret-keys "Reprox" | wrangler secret put GPG_PRIVATE_KEY
+gpg --armor --export-secret-keys "Reprox" | npx wrangler secret put GPG_PRIVATE_KEY
 
-# Optional: if your GPG key has a passphrase
-wrangler secret put GPG_PASSPHRASE
+# Optional: if using a GPG key that has a passphrase
+npx wrangler secret put GPG_PASSPHRASE
 
-# Optional: add GitHub token for higher rate limits
-wrangler secret put GITHUB_TOKEN
+# Optional: add GitHub token for higher rate limits (60 → 5,000 req/hr)
+npx wrangler secret put GITHUB_TOKEN
 
+# Deploy
 npm run deploy
+```
+
+### Configuration
+
+**Secrets** (set via `npx wrangler secret put <NAME>`):
+
+| Secret | Description |
+|--------|-------------|
+| `GPG_PRIVATE_KEY` | ASCII-armored GPG private key for signing (recommended) |
+| `GPG_PASSPHRASE` | Passphrase if your GPG key is encrypted |
+| `GITHUB_TOKEN` | GitHub PAT for higher API rate limits |
+
+**Environment Variables** (set in `wrangler.toml`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CACHE_TTL` | `86400` | Cache TTL in seconds (24 hours) |
+
+### Custom Domain
+
+Add a custom domain via Cloudflare dashboard (Workers → Triggers → Custom Domains) or in `wrangler.toml`:
+
+```toml
+routes = [
+  { pattern = "packages.example.com/*", zone_name = "example.com" }
+]
+```
+
+### Updating
+
+```bash
+git pull && npm install && npm run deploy
 ```
 
 ## License
