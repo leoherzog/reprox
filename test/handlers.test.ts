@@ -43,6 +43,19 @@ describe('root path handler', () => {
     expect(text).toContain('APT');
     expect(text).toContain('RPM');
   });
+
+  it('uses dynamic URL based on incoming request', async () => {
+    const env = createMockEnv();
+    const ctx = createMockExecutionContext();
+    const request = new Request('https://custom.domain.com/');
+
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).toContain('https://custom.domain.com/{owner}/{repo}');
+    expect(text).not.toContain('reprox.dev');
+  });
 });
 
 // ============================================================================

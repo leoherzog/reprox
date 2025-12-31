@@ -54,30 +54,29 @@ export default {
 
       // Handle root path - show usage instructions
       if (url.pathname === '/' || url.pathname === '') {
+        const baseUrl = `${url.protocol}//${url.host}`;
         return new Response(
           'Reprox - Serverless APT/RPM Repository Gateway\n\n' +
           '=== APT (Debian/Ubuntu) ===\n\n' +
-          '  # Import the repository signing key\n' +
-          '  curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | \\\n' +
+          '  # Import the signing key\n' +
+          `  curl -fsSL ${baseUrl}/{owner}/{repo}/public.key | \\\n` +
           '    sudo gpg --dearmor -o /etc/apt/keyrings/{repo}.gpg\n\n' +
-          '  # Add the repository (with signature verification)\n' +
-          '  echo "deb [signed-by=/etc/apt/keyrings/{repo}.gpg] https://reprox.dev/{owner}/{repo} stable main" | \\\n' +
+          '  # Add the repository\n' +
+          `  echo "deb [signed-by=/etc/apt/keyrings/{repo}.gpg] ${baseUrl}/{owner}/{repo} stable main" | \\\n` +
           '    sudo tee /etc/apt/sources.list.d/{repo}.list\n\n' +
-          '  # Update and install\n' +
-          '  sudo apt update && sudo apt install {package-name}\n\n' +
+          '  # Install\n' +
+          '  sudo apt update && sudo apt install {package}\n\n' +
           '=== RPM (Fedora/RHEL/CentOS) ===\n\n' +
-          '  # Create repo file (with GPG verification)\n' +
           '  sudo tee /etc/yum.repos.d/{repo}.repo << EOF\n' +
           '  [{repo}]\n' +
           '  name={repo} from GitHub via Reprox\n' +
-          '  baseurl=https://reprox.dev/{owner}/{repo}\n' +
+          `  baseurl=${baseUrl}/{owner}/{repo}\n` +
           '  enabled=1\n' +
-          '  gpgcheck=1\n' +
-          '  gpgkey=https://reprox.dev/{owner}/{repo}/public.key\n' +
+          '  gpgcheck=0\n' +
           '  repo_gpgcheck=1\n' +
+          `  gpgkey=${baseUrl}/{owner}/{repo}/public.key\n` +
           '  EOF\n\n' +
-          '  # Install\n' +
-          '  sudo dnf install {package-name}\n',
+          '  sudo dnf install {package}\n',
           {
             status: 200,
             headers: { 'Content-Type': 'text/plain' },
