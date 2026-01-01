@@ -845,6 +845,13 @@ describe('parseArHeaders edge cases', () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0].name).toBe(longName);
+    // Verify offset and size are adjusted to skip the embedded filename
+    expect(entries[0].size).toBe(content.length);
+    expect(entries[0].offset).toBe(magic.length + headerBytes.length + nameLength);
+
+    // Verify extraction returns only the content, not the embedded filename
+    const extracted = extractArFile(buffer, entries[0]);
+    expect(extracted).toEqual(content);
   });
 
   it('throws on invalid file header magic', () => {

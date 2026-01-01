@@ -21,8 +21,6 @@ export interface ReleaseConfig {
 export interface ReleaseFileEntry {
   path: string;
   size: number;
-  md5?: string;
-  sha1?: string;
   sha256: string;
 }
 
@@ -48,27 +46,7 @@ export function generateReleaseFile(
   // Enable Acquire-By-Hash for consistent fetching during updates
   lines.push(`Acquire-By-Hash: yes`);
 
-  // MD5Sum section (optional, deprecated but some tools still want it)
-  if (files.some(f => f.md5)) {
-    lines.push('MD5Sum:');
-    for (const file of files) {
-      if (file.md5) {
-        lines.push(` ${file.md5} ${file.size.toString().padStart(8)} ${file.path}`);
-      }
-    }
-  }
-
-  // SHA1 section (optional, deprecated)
-  if (files.some(f => f.sha1)) {
-    lines.push('SHA1:');
-    for (const file of files) {
-      if (file.sha1) {
-        lines.push(` ${file.sha1} ${file.size.toString().padStart(8)} ${file.path}`);
-      }
-    }
-  }
-
-  // SHA256 section (required)
+  // SHA256 section
   lines.push('SHA256:');
   for (const file of files) {
     lines.push(` ${file.sha256} ${file.size.toString().padStart(8)} ${file.path}`);
@@ -139,14 +117,15 @@ export async function buildReleaseEntries(
   packagesContentByArch: Map<string, string>,
   component: string
 ): Promise<ReleaseFileEntry[]> {
-  const entries: ReleaseFileEntry[] = [];
+  // Process all architectures in parallel
+  const entryArrays = await Promise.all(
+    Array.from(packagesContentByArch.entries()).map(
+      ([architecture, packagesContent]) =>
+        buildReleaseEntriesForArch(packagesContent, component, architecture)
+    )
+  );
 
-  for (const [architecture, packagesContent] of packagesContentByArch) {
-    const archEntries = await buildReleaseEntriesForArch(packagesContent, component, architecture);
-    entries.push(...archEntries);
-  }
-
-  return entries;
+  return entryArrays.flat();
 }
 
 /**

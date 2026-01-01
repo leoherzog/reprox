@@ -35,16 +35,16 @@ export async function generateRepomdXml(files: RepomdFileInfo): Promise<string> 
   // repomd.xml and repomd.xml.asc have identical content
   const timestamp = files.timestamp;
 
-  // Calculate checksums for all files
-  const [primaryChecksum, primaryGzChecksum] = await Promise.all([
+  // Calculate checksums for all files in parallel
+  const [
+    primaryChecksum, primaryGzChecksum,
+    filelistsChecksum, filelistsGzChecksum,
+    otherChecksum, otherGzChecksum,
+  ] = await Promise.all([
     sha256(files.primary.xml),
     sha256(files.primary.gz),
-  ]);
-  const [filelistsChecksum, filelistsGzChecksum] = await Promise.all([
     sha256(files.filelists.xml),
     sha256(files.filelists.gz),
-  ]);
-  const [otherChecksum, otherGzChecksum] = await Promise.all([
     sha256(files.other.xml),
     sha256(files.other.gz),
   ]);

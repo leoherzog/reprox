@@ -18,8 +18,8 @@ import type { Env } from '../../src/types';
 export function createMockEnv(overrides: Partial<Env> = {}): Env {
   return {
     GITHUB_TOKEN: 'test-token',
-    SIGNING_KEY: '',
-    SIGNING_KEY_PASSPHRASE: '',
+    GPG_PRIVATE_KEY: '',
+    GPG_PASSPHRASE: '',
     CACHE_TTL: '86400',
     ...overrides,
   } as Env;
@@ -176,8 +176,8 @@ export function createRpmHeaderData(overrides: Partial<RpmHeaderData> = {}): Rpm
     vendor: '',
     packager: '',
     buildTime: 1700000000,
-    buildHost: 'builder.example.com',
     sourceRpm: 'test-package-1.0.0-1.src.rpm',
+    installedSize: 0,
     requires: [],
     provides: [],
     obsoletes: [],
@@ -195,9 +195,9 @@ export function createRpmPackageEntry(overrides: Partial<RpmPackageEntry> = {}):
   return {
     headerData: createRpmHeaderData(overrides.headerData),
     filename: 'test-package-1.0.0-1.x86_64.rpm',
-    fileSize: 50000,
-    sha256: 'abc123def456',
-    location: 'https://github.com/owner/repo/releases/download/v1.0.0/test-package-1.0.0-1.x86_64.rpm',
+    size: 50000,
+    checksum: 'abc123def456',
+    checksumType: 'sha256',
     ...overrides,
   };
 }

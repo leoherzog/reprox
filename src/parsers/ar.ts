@@ -60,13 +60,21 @@ export function parseArHeaders(buffer: ArrayBuffer): ArEntry[] {
       throw new Error(`Invalid AR file header at offset ${offset}: bad magic "${fileMagic}"`);
     }
 
+    // Track adjustments for BSD-style extended filenames
+    let dataOffset = offset + AR_HEADER_SIZE;
+    let dataSize = size;
+
     // Handle BSD-style extended filenames (not common in .deb but good to handle)
+    // In BSD format, the filename is stored at the start of the data section
     if (name.startsWith('#1/')) {
       const nameLen = parseInt(name.slice(3), 10);
       const extendedName = decoder.decode(
         new Uint8Array(buffer, offset + AR_HEADER_SIZE, nameLen)
       ).replace(/\0+$/, '');
       name = extendedName;
+      // Adjust offset and size to skip past the embedded filename
+      dataOffset += nameLen;
+      dataSize -= nameLen;
     }
 
     // Handle GNU-style extended filenames (filename ends with /)
@@ -80,8 +88,8 @@ export function parseArHeaders(buffer: ArrayBuffer): ArEntry[] {
       ownerId,
       groupId,
       mode,
-      size,
-      offset: offset + AR_HEADER_SIZE,
+      size: dataSize,
+      offset: dataOffset,
     });
 
     // Move to next entry (aligned to even boundary)

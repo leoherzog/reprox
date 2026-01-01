@@ -507,4 +507,52 @@ describe('CacheManager', () => {
       expect(result).toBe('');
     });
   });
+
+  // ==========================================================================
+  // Asset URL Caching Tests
+  // ==========================================================================
+
+  describe('Asset URL caching', () => {
+    const releaseHash = 'abc123def456';
+
+    it('stores and retrieves asset URLs with release hash', async () => {
+      const url = 'https://github.com/owner/repo/releases/download/v1.0/pkg.deb';
+      await cacheManager.setAssetUrl('owner', 'repo', 'pkg.deb', variant, releaseHash, url);
+
+      const result = await cacheManager.getAssetUrl('owner', 'repo', 'pkg.deb', variant, releaseHash);
+      expect(result).toBe(url);
+    });
+
+    it('returns null for different release hash (auto-invalidation)', async () => {
+      const url = 'https://github.com/owner/repo/releases/download/v1.0/pkg.deb';
+      await cacheManager.setAssetUrl('owner', 'repo', 'pkg.deb', variant, releaseHash, url);
+
+      // Different hash should not find the cached URL
+      const result = await cacheManager.getAssetUrl('owner', 'repo', 'pkg.deb', variant, 'different-hash');
+      expect(result).toBeNull();
+    });
+
+    it('stores multiple asset URLs at once', async () => {
+      const assets = [
+        { name: 'pkg1.deb', browser_download_url: 'https://example.com/pkg1.deb' },
+        { name: 'pkg2.deb', browser_download_url: 'https://example.com/pkg2.deb' },
+      ];
+
+      await cacheManager.setAssetUrls('owner', 'repo', variant, releaseHash, assets);
+
+      expect(await cacheManager.getAssetUrl('owner', 'repo', 'pkg1.deb', variant, releaseHash))
+        .toBe('https://example.com/pkg1.deb');
+      expect(await cacheManager.getAssetUrl('owner', 'repo', 'pkg2.deb', variant, releaseHash))
+        .toBe('https://example.com/pkg2.deb');
+    });
+
+    it('isolates asset URLs by release variant', async () => {
+      const url = 'https://example.com/pkg.deb';
+      await cacheManager.setAssetUrl('owner', 'repo', 'pkg.deb', 'stable', releaseHash, url);
+
+      // Same filename, different variant should not match
+      const result = await cacheManager.getAssetUrl('owner', 'repo', 'pkg.deb', 'prerelease', releaseHash);
+      expect(result).toBeNull();
+    });
+  });
 });

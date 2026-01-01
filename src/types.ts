@@ -35,8 +35,6 @@ export interface RouteInfo {
 export interface GitHubRelease {
   id: number;
   tag_name: string;
-  name: string;
-  body: string;
   published_at: string;
   prerelease: boolean;
   assets: GitHubAsset[];

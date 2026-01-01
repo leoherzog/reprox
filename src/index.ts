@@ -53,7 +53,7 @@ export default {
       const route = parseRoute(url.pathname);
 
       // Handle root path - serve README from GitHub with dynamic replacements
-      if (url.pathname === '/' || url.pathname === '') {
+      if (url.pathname === '/') {
         const cache = createCacheManager(env.CACHE_TTL);
         if (url.searchParams.get('cache') === 'false') {
           await cache.clearReadme();
@@ -245,52 +245,21 @@ export function parseRoute(pathname: string): RouteInfo {
   }
 
   // RPM Repository Routes
-  // /{owner}/{repo}(/prerelease)?/repodata/repomd.xml
+  // /{owner}/{repo}(/prerelease)?/repodata/{file}
   if (p(2) === 'repodata') {
-    if (p(3) === 'repomd.xml') {
-      route.type = 'repomd';
-      return route;
-    }
-
-    // /{owner}/{repo}(/prerelease)?/repodata/repomd.xml.asc
-    if (p(3) === 'repomd.xml.asc') {
-      route.type = 'repomd-asc';
-      return route;
-    }
-
-    // /{owner}/{repo}(/prerelease)?/repodata/primary.xml
-    if (p(3) === 'primary.xml') {
-      route.type = 'primary';
-      return route;
-    }
-
-    // /{owner}/{repo}(/prerelease)?/repodata/primary.xml.gz
-    if (p(3) === 'primary.xml.gz') {
-      route.type = 'primary-gz';
-      return route;
-    }
-
-    // /{owner}/{repo}(/prerelease)?/repodata/filelists.xml
-    if (p(3) === 'filelists.xml') {
-      route.type = 'filelists';
-      return route;
-    }
-
-    // /{owner}/{repo}(/prerelease)?/repodata/filelists.xml.gz
-    if (p(3) === 'filelists.xml.gz') {
-      route.type = 'filelists-gz';
-      return route;
-    }
-
-    // /{owner}/{repo}(/prerelease)?/repodata/other.xml
-    if (p(3) === 'other.xml') {
-      route.type = 'other';
-      return route;
-    }
-
-    // /{owner}/{repo}(/prerelease)?/repodata/other.xml.gz
-    if (p(3) === 'other.xml.gz') {
-      route.type = 'other-gz';
+    const repodataRoutes: Record<string, RouteInfo['type']> = {
+      'repomd.xml': 'repomd',
+      'repomd.xml.asc': 'repomd-asc',
+      'primary.xml': 'primary',
+      'primary.xml.gz': 'primary-gz',
+      'filelists.xml': 'filelists',
+      'filelists.xml.gz': 'filelists-gz',
+      'other.xml': 'other',
+      'other.xml.gz': 'other-gz',
+    };
+    const routeType = repodataRoutes[p(3)];
+    if (routeType) {
+      route.type = routeType;
       return route;
     }
   }
@@ -692,25 +661,32 @@ async function generateReleaseContent(
   const debAssets = filterDebAssets(allAssets);
   const architectures = getArchitecturesFromAssets(debAssets);
 
-  // Generate Packages content for each architecture
+  // Generate Packages content for all architectures in parallel
   const packagesContentByArch = new Map<string, string>();
 
-  for (const arch of architectures) {
-    const archAssets = filterByArchitecture(debAssets, arch);
-    if (archAssets.length === 0) continue;
+  const archResults = await Promise.all(
+    architectures.map(async (arch) => {
+      const archAssets = filterByArchitecture(debAssets, arch);
+      if (archAssets.length === 0) return null;
 
-    const packages = await generatePackagesContentMultiRelease(
-      owner,
-      repo,
-      archAssets,
-      env.GITHUB_TOKEN
-    );
+      const packages = await generatePackagesContentMultiRelease(
+        owner,
+        repo,
+        archAssets,
+        env.GITHUB_TOKEN
+      );
 
-    const content = generatePackagesFile(packages);
-    packagesContentByArch.set(arch, content);
+      const content = generatePackagesFile(packages);
+      return { arch, content };
+    })
+  );
 
-    // Cache each architecture's Packages file
-    ctx.waitUntil(cache.setPackagesFile(owner, repo, arch, releaseVariant, content));
+  // Populate map and cache results
+  for (const result of archResults) {
+    if (result) {
+      packagesContentByArch.set(result.arch, result.content);
+      ctx.waitUntil(cache.setPackagesFile(owner, repo, result.arch, releaseVariant, result.content));
+    }
   }
 
   // Build Release config with detected architectures and most recent release timestamp
@@ -743,31 +719,46 @@ async function generateAndCacheAll(
 
   if (releases.length === 0) return;
 
+  // Compute release hash for cache invalidation
+  const releaseHash = computeReleaseIdsHash(releases);
+
   // Aggregate assets from all releases
   const allAssets = aggregateAssets(releases);
 
-  // Cache all asset URLs for efficient binary redirects
-  await cache.setAssetUrls(owner, repo, releaseVariant, allAssets);
+  // Cache all asset URLs for efficient binary redirects (keyed by release hash for auto-invalidation)
+  await cache.setAssetUrls(owner, repo, releaseVariant, releaseHash, allAssets);
 
   const debAssets = filterDebAssets(allAssets);
   const architectures = getArchitecturesFromAssets(debAssets);
   const packagesContentByArch = new Map<string, string>();
 
-  for (const arch of architectures) {
-    const archAssets = filterByArchitecture(debAssets, arch);
-    if (archAssets.length === 0) continue;
+  // Generate and cache Packages content for all architectures in parallel
+  const archResults = await Promise.all(
+    architectures.map(async (arch) => {
+      const archAssets = filterByArchitecture(debAssets, arch);
+      if (archAssets.length === 0) return null;
 
-    const packages = await generatePackagesContentMultiRelease(
-      owner,
-      repo,
-      archAssets,
-      env.GITHUB_TOKEN
-    );
+      const packages = await generatePackagesContentMultiRelease(
+        owner,
+        repo,
+        archAssets,
+        env.GITHUB_TOKEN
+      );
 
-    const content = generatePackagesFile(packages);
-    packagesContentByArch.set(arch, content);
-    await cache.setPackagesFile(owner, repo, arch, releaseVariant, content);
-  }
+      const content = generatePackagesFile(packages);
+      return { arch, content };
+    })
+  );
+
+  // Populate map and cache results
+  await Promise.all(
+    archResults
+      .filter((result): result is { arch: string; content: string } => result !== null)
+      .map(async ({ arch, content }) => {
+        packagesContentByArch.set(arch, content);
+        await cache.setPackagesFile(owner, repo, arch, releaseVariant, content);
+      })
+  );
 
   const config = {
     ...defaultReleaseConfig(owner, repo),
@@ -779,7 +770,7 @@ async function generateAndCacheAll(
   const releaseContent = generateReleaseFile(config, entries);
 
   await cache.setReleaseFile(owner, repo, releaseVariant, releaseContent);
-  await cache.setReleaseIdsHash(owner, repo, releaseVariant, computeReleaseIdsHash(releases));
+  await cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseHash);
 
   if (env.GPG_PRIVATE_KEY) {
     const inRelease = await signCleartext(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
@@ -987,21 +978,30 @@ async function handleBinaryRedirect(
   const typeName = packageType === 'deb' ? 'Asset' : 'RPM package';
 
   try {
-    // Check cache first for the asset URL
-    const cachedUrl = await cache.getAssetUrl(owner, repo, filename, releaseVariant);
-    if (cachedUrl) {
-      return Response.redirect(cachedUrl, 302);
+    // Try to get cached release hash first - if it exists, we can check asset URL cache
+    const cachedReleaseHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
+    if (cachedReleaseHash) {
+      const cachedUrl = await cache.getAssetUrl(owner, repo, filename, releaseVariant, cachedReleaseHash);
+      if (cachedUrl) {
+        return Response.redirect(cachedUrl, 302);
+      }
     }
 
-    // Cache miss - search across all releases for the requested asset
+    // Cache miss or no release hash - fetch releases and search for the asset
     const includePrerelease = releaseVariant === 'prerelease';
     const releases = await github.getAllReleases(owner, repo, includePrerelease);
+
+    if (releases.length === 0) {
+      return new Response(`${typeName} not found: ${filename}`, { status: 404 });
+    }
+
+    const releaseHash = computeReleaseIdsHash(releases);
 
     for (const release of releases) {
       const asset = release.assets.find(a => a.name === filename);
       if (asset) {
-        // Cache the URL for next time
-        await cache.setAssetUrl(owner, repo, filename, releaseVariant, asset.browser_download_url);
+        // Cache the URL for next time (keyed by release hash for auto-invalidation)
+        await cache.setAssetUrl(owner, repo, filename, releaseVariant, releaseHash, asset.browser_download_url);
         // 302 redirect to GitHub's CDN - offloads bandwidth from Worker
         return Response.redirect(asset.browser_download_url, 302);
       }
@@ -1315,7 +1315,7 @@ async function getCachedRpmMetadata(
       cache.setRpmOtherXml(owner, repo, releaseVariant, metadata.otherXml),
       cache.setRpmTimestamp(owner, repo, releaseVariant, timestamp),
       cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseIdsHash),
-      cache.setAssetUrls(owner, repo, releaseVariant, allAssets),
+      cache.setAssetUrls(owner, repo, releaseVariant, releaseIdsHash, allAssets),
     ])
   );
 

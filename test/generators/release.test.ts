@@ -101,30 +101,13 @@ describe('generateReleaseFile', () => {
       expect(output).toContain(' sha256hash');
     });
 
-    it('includes MD5Sum section when present', () => {
-      const config = createReleaseConfig();
-      const files = [createFileEntry({ md5: 'md5hash', sha256: 'sha256hash' })];
-      const output = generateReleaseFile(config, files);
-
-      expect(output).toContain('MD5Sum:');
-      expect(output).toContain(' md5hash');
-    });
-
-    it('includes SHA1 section when present', () => {
-      const config = createReleaseConfig();
-      const files = [createFileEntry({ sha1: 'sha1hash', sha256: 'sha256hash' })];
-      const output = generateReleaseFile(config, files);
-
-      expect(output).toContain('SHA1:');
-      expect(output).toContain(' sha1hash');
-    });
-
-    it('omits MD5Sum section when not present', () => {
+    it('only includes SHA256 (no deprecated MD5 or SHA1)', () => {
       const config = createReleaseConfig();
       const files = [createFileEntry({ sha256: 'sha256hash' })];
       const output = generateReleaseFile(config, files);
 
       expect(output).not.toContain('MD5Sum:');
+      expect(output).not.toContain('SHA1:');
     });
 
     it('formats checksum entries with padded size', () => {

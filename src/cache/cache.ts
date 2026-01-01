@@ -116,8 +116,9 @@ export class CacheManager {
     return 'readme';
   }
 
-  private assetUrlKey(owner: string, repo: string, filename: string, variant: ReleaseVariant): string {
-    return `asset-url/${variant}/${owner}/${repo}/${filename}`;
+  private assetUrlKey(owner: string, repo: string, filename: string, variant: ReleaseVariant, releaseHash: string): string {
+    // Include release hash so URLs auto-invalidate when releases change
+    return `asset-url/${variant}/${owner}/${repo}/${releaseHash}/${filename}`;
   }
 
   // =============================================================================
@@ -379,9 +380,10 @@ export class CacheManager {
     owner: string,
     repo: string,
     filename: string,
-    variant: ReleaseVariant
+    variant: ReleaseVariant,
+    releaseHash: string
   ): Promise<string | null> {
-    const key = this.assetUrlKey(owner, repo, filename, variant);
+    const key = this.assetUrlKey(owner, repo, filename, variant, releaseHash);
     return this.getFromCache(key);
   }
 
@@ -393,9 +395,10 @@ export class CacheManager {
     repo: string,
     filename: string,
     variant: ReleaseVariant,
+    releaseHash: string,
     url: string
   ): Promise<void> {
-    const key = this.assetUrlKey(owner, repo, filename, variant);
+    const key = this.assetUrlKey(owner, repo, filename, variant, releaseHash);
     await this.putInCache(key, url, this.defaultTtl);
   }
 
@@ -406,11 +409,12 @@ export class CacheManager {
     owner: string,
     repo: string,
     variant: ReleaseVariant,
+    releaseHash: string,
     assets: Array<{ name: string; browser_download_url: string }>
   ): Promise<void> {
     await Promise.all(
       assets.map(asset =>
-        this.setAssetUrl(owner, repo, asset.name, variant, asset.browser_download_url)
+        this.setAssetUrl(owner, repo, asset.name, variant, releaseHash, asset.browser_download_url)
       )
     );
   }
