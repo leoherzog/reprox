@@ -61,6 +61,11 @@ export default {
         return handleReadme(request, url, cache, env, ctx);
       }
 
+      // Handle favicon request
+      if (url.pathname === '/favicon.ico') {
+        return handleFavicon();
+      }
+
       // Validate route has owner/repo
       if (!route.owner || !route.repo) {
         return new Response('Invalid repository path. Use /{owner}/{repo}/...', { status: 400 });
@@ -370,6 +375,7 @@ async function handleReadme(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Reprox</title>
+  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@latest/github-markdown.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/styles/github.min.css" media="(prefers-color-scheme: light)">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
@@ -412,6 +418,28 @@ async function handleReadme(
     headers: {
       'Content-Type': 'text/markdown; charset=utf-8',
       'Cache-Control': 'public, max-age=300',
+    },
+  });
+}
+
+/**
+ * Handle favicon request - serves SVG favicon with light/dark mode support
+ */
+function handleFavicon(): Response {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 640">
+  <style>
+    path { fill: #1f2328; }
+    @media (prefers-color-scheme: dark) {
+      path { fill: #f0f6fc; }
+    }
+  </style>
+  <path d="M432 96C387.8 96 352 131.8 352 176L352 424.2L54.8 513.4C37.9 518.4 28.3 536.3 33.4 553.2C38.5 570.1 56.3 579.7 73.2 574.7L388.7 480.1L432.4 480.1C432.2 482.7 432 485.4 432 488.1C432 536.7 471.4 576.1 520 576.1C568.6 576.1 608 536.7 608 488.1L608 96.1L432 96.1zM560 488C560 510.1 542.1 528 520 528C497.9 528 480 510.1 480 488C480 465.9 497.9 448 520 448C542.1 448 559.9 465.9 560 487.9L560 488zM83.9 213.5C50.1 223.8 31.1 259.6 41.4 293.4L69.5 385.2C79.8 419 115.6 438 149.4 427.7L241.2 399.6C275 389.3 294 353.5 283.7 319.7L255.6 227.9C245.3 194.1 209.5 175.1 175.7 185.4L83.9 213.5z"/>
+</svg>`;
+
+  return new Response(svg, {
+    headers: {
+      'Content-Type': 'image/svg+xml',
+      'Cache-Control': 'public, max-age=86400',
     },
   });
 }
