@@ -228,10 +228,10 @@ describe('generatePackagesFile', () => {
 describe('filterDebAssets', () => {
   it('filters to only .deb files', () => {
     const assets: AssetLike[] = [
-      { name: 'package_1.0.0_amd64.deb', size: 1000, browser_download_url: 'url1' },
-      { name: 'package-1.0.0.tar.gz', size: 2000, browser_download_url: 'url2' },
-      { name: 'package-1.0.0.x86_64.rpm', size: 3000, browser_download_url: 'url3' },
-      { name: 'package_1.0.0_arm64.deb', size: 4000, browser_download_url: 'url4' },
+      { name: 'package_1.0.0_amd64.deb', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { name: 'package-1.0.0.tar.gz', size: 2000, browser_download_url: 'url2', digest: 'sha256:def456' },
+      { name: 'package-1.0.0.x86_64.rpm', size: 3000, browser_download_url: 'url3', digest: 'sha256:ghi789' },
+      { name: 'package_1.0.0_arm64.deb', size: 4000, browser_download_url: 'url4', digest: 'sha256:jkl012' },
     ];
 
     const result = filterDebAssets(assets);
@@ -243,8 +243,8 @@ describe('filterDebAssets', () => {
 
   it('returns empty array when no .deb files', () => {
     const assets: AssetLike[] = [
-      { name: 'package.tar.gz', size: 1000, browser_download_url: 'url1' },
-      { name: 'package.rpm', size: 2000, browser_download_url: 'url2' },
+      { name: 'package.tar.gz', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { name: 'package.rpm', size: 2000, browser_download_url: 'url2', digest: 'sha256:def456' },
     ];
 
     const result = filterDebAssets(assets);
@@ -256,6 +256,19 @@ describe('filterDebAssets', () => {
     const result = filterDebAssets([]);
     expect(result).toHaveLength(0);
   });
+
+  it('excludes assets without digest', () => {
+    const assets: AssetLike[] = [
+      { name: 'package_1.0.0_amd64.deb', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { name: 'package_1.0.0_arm64.deb', size: 2000, browser_download_url: 'url2' }, // no digest
+      { name: 'package_1.0.0_i386.deb', size: 3000, browser_download_url: 'url3', digest: undefined },
+    ];
+
+    const result = filterDebAssets(assets);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe('package_1.0.0_amd64.deb');
+  });
 });
 
 // ============================================================================
@@ -264,10 +277,10 @@ describe('filterDebAssets', () => {
 
 describe('filterByArchitecture', () => {
   const assets: AssetLike[] = [
-    { name: 'pkg_1.0.0_amd64.deb', size: 1000, browser_download_url: 'url1' },
-    { name: 'pkg_1.0.0_arm64.deb', size: 2000, browser_download_url: 'url2' },
-    { name: 'pkg_1.0.0_i386.deb', size: 3000, browser_download_url: 'url3' },
-    { name: 'pkg_1.0.0_all.deb', size: 4000, browser_download_url: 'url4' },
+    { name: 'pkg_1.0.0_amd64.deb', size: 1000, browser_download_url: 'url1', digest: 'sha256:a' },
+    { name: 'pkg_1.0.0_arm64.deb', size: 2000, browser_download_url: 'url2', digest: 'sha256:b' },
+    { name: 'pkg_1.0.0_i386.deb', size: 3000, browser_download_url: 'url3', digest: 'sha256:c' },
+    { name: 'pkg_1.0.0_all.deb', size: 4000, browser_download_url: 'url4', digest: 'sha256:d' },
   ];
 
   it('returns matching arch plus all packages for specific arch', () => {

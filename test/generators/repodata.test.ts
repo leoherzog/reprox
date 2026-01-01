@@ -468,12 +468,12 @@ describe('generateOtherXml', () => {
 // ============================================================================
 
 describe('filterRpmAssets', () => {
-  it('filters to only .rpm files', () => {
+  it('filters to only .rpm files with valid digest', () => {
     const assets: AssetLike[] = [
-      { name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1' },
-      { name: 'package-1.0.0.tar.gz', size: 2000, browser_download_url: 'url2' },
-      { name: 'package_1.0.0_amd64.deb', size: 3000, browser_download_url: 'url3' },
-      { name: 'package-1.0.0-1.aarch64.rpm', size: 4000, browser_download_url: 'url4' },
+      { name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { name: 'package-1.0.0.tar.gz', size: 2000, browser_download_url: 'url2', digest: 'sha256:def456' },
+      { name: 'package_1.0.0_amd64.deb', size: 3000, browser_download_url: 'url3', digest: 'sha256:ghi789' },
+      { name: 'package-1.0.0-1.aarch64.rpm', size: 4000, browser_download_url: 'url4', digest: 'sha256:jkl012' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -485,8 +485,8 @@ describe('filterRpmAssets', () => {
 
   it('excludes source RPMs (.src.rpm)', () => {
     const assets: AssetLike[] = [
-      { name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1' },
-      { name: 'package-1.0.0-1.src.rpm', size: 5000, browser_download_url: 'url2' },
+      { name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { name: 'package-1.0.0-1.src.rpm', size: 5000, browser_download_url: 'url2', digest: 'sha256:def456' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -497,7 +497,7 @@ describe('filterRpmAssets', () => {
 
   it('includes nosrc RPMs (only .src.rpm is excluded)', () => {
     const assets: AssetLike[] = [
-      { name: 'package-1.0.0-1.nosrc.rpm', size: 6000, browser_download_url: 'url1' },
+      { name: 'package-1.0.0-1.nosrc.rpm', size: 6000, browser_download_url: 'url1', digest: 'sha256:abc123' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -508,8 +508,8 @@ describe('filterRpmAssets', () => {
 
   it('returns empty array when no .rpm files', () => {
     const assets: AssetLike[] = [
-      { name: 'package.tar.gz', size: 1000, browser_download_url: 'url1' },
-      { name: 'package.deb', size: 2000, browser_download_url: 'url2' },
+      { name: 'package.tar.gz', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { name: 'package.deb', size: 2000, browser_download_url: 'url2', digest: 'sha256:def456' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -524,10 +524,10 @@ describe('filterRpmAssets', () => {
 
   it('handles real-world filenames', () => {
     const assets: AssetLike[] = [
-      { name: 'go-hass-agent-11.2.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1' },
-      { name: 'go-hass-agent-11.2.0-1.aarch64.rpm', size: 1000, browser_download_url: 'url2' },
-      { name: 'obsidian-1.5.12-1.x86_64.rpm', size: 2000, browser_download_url: 'url3' },
-      { name: 'LocalSend-1.14.0-1.linux.x86_64.rpm', size: 3000, browser_download_url: 'url4' },
+      { name: 'go-hass-agent-11.2.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc' },
+      { name: 'go-hass-agent-11.2.0-1.aarch64.rpm', size: 1000, browser_download_url: 'url2', digest: 'sha256:def' },
+      { name: 'obsidian-1.5.12-1.x86_64.rpm', size: 2000, browser_download_url: 'url3', digest: 'sha256:ghi' },
+      { name: 'LocalSend-1.14.0-1.linux.x86_64.rpm', size: 3000, browser_download_url: 'url4', digest: 'sha256:jkl' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -541,13 +541,26 @@ describe('filterRpmAssets', () => {
     }
 
     const assets: ExtendedAsset[] = [
-      { name: 'pkg.rpm', size: 100, browser_download_url: 'url', id: 123 },
+      { name: 'pkg.rpm', size: 100, browser_download_url: 'url', id: 123, digest: 'sha256:abc123' },
     ];
 
     const result = filterRpmAssets(assets);
 
     expect(result).toHaveLength(1);
     expect(result[0].id).toBe(123);
+  });
+
+  it('excludes assets without digest', () => {
+    const assets: AssetLike[] = [
+      { name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { name: 'package-1.0.0-1.aarch64.rpm', size: 2000, browser_download_url: 'url2' }, // no digest
+      { name: 'package-1.0.0-1.i686.rpm', size: 3000, browser_download_url: 'url3', digest: undefined },
+    ];
+
+    const result = filterRpmAssets(assets);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].name).toBe('package-1.0.0-1.x86_64.rpm');
   });
 });
 

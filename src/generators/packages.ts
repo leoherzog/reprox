@@ -174,10 +174,15 @@ export async function buildPackageEntry(
 }
 
 /**
- * Filter assets to only .deb files
+ * Filter assets to only .deb files that have valid SHA256 checksums.
+ * Assets without digests (older GitHub releases) are excluded because APT
+ * validates checksums against the Packages file.
  */
 export function filterDebAssets<T extends AssetLike>(assets: T[]): T[] {
-  return assets.filter(asset => asset.name.endsWith('.deb'));
+  return assets.filter(asset =>
+    asset.name.endsWith('.deb') &&
+    asset.digest?.startsWith('sha256:')
+  );
 }
 
 /**

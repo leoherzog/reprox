@@ -1,6 +1,6 @@
-import type { Env, RouteInfo, PackageEntry, RpmPackageEntry } from './types';
+import type { Env, RouteInfo, PackageEntry, RpmPackageEntry, GitHubRelease, AggregatedAsset } from './types';
 import { GitHubClient, getArchitecturesFromAssets } from './github/api';
-import { CacheManager, createCacheManager } from './cache/cache';
+import { CacheManager, createCacheManager, computeReleaseIdsHash, type ReleaseVariant } from './cache/cache';
 import {
   generatePackagesFile,
   buildPackageEntry,
@@ -110,7 +110,7 @@ export default {
           return handlePackagesGz(route, github, cache, env, ctx);
 
         case 'binary':
-          return handleBinaryRedirect(route, github);
+          return handleBinaryRedirect(route, github, cache);
 
         case 'by-hash':
           return handleByHash(route, github, cache, env, ctx);
@@ -141,7 +141,7 @@ export default {
           return handleRpmXml(route, github, cache, env, ctx, 'other', true);
 
         case 'rpm-binary':
-          return handleBinaryRedirect(route, github, 'rpm');
+          return handleBinaryRedirect(route, github, cache, 'rpm');
 
         default:
           return new Response('Not Found', { status: 404 });
@@ -160,6 +160,14 @@ export default {
 export function parseRoute(pathname: string): RouteInfo {
   const parts = pathname.split('/').filter(Boolean);
 
+  // Detect /prerelease segment and calculate offset for subsequent parts
+  // /{owner}/{repo}/prerelease/... or /{owner}/{repo}/...
+  const hasPrerelease = parts[2] === 'prerelease';
+  const offset = hasPrerelease ? 1 : 0;
+
+  // Helper to get part with offset applied (for parts after owner/repo)
+  const p = (index: number) => parts[index + offset];
+
   const route: RouteInfo = {
     owner: parts[0] || '',
     repo: parts[1] || '',
@@ -167,66 +175,67 @@ export function parseRoute(pathname: string): RouteInfo {
     component: 'main',
     architecture: 'amd64',
     filename: '',
+    releaseVariant: hasPrerelease ? 'prerelease' : 'stable',
     type: 'unknown',
   };
 
-  // /{owner}/{repo}/public.key
-  if (parts[2] === 'public.key') {
+  // /{owner}/{repo}(/prerelease)?/public.key
+  if (p(2) === 'public.key') {
     route.type = 'public-key';
     return route;
   }
 
-  // /{owner}/{repo}/dists/{dist}/...
-  if (parts[2] === 'dists' && parts[3]) {
-    route.distribution = parts[3];
+  // /{owner}/{repo}(/prerelease)?/dists/{dist}/...
+  if (p(2) === 'dists' && p(3)) {
+    route.distribution = p(3);
 
-    // /{owner}/{repo}/dists/{dist}/InRelease
-    if (parts[4] === 'InRelease') {
+    // /{owner}/{repo}(/prerelease)?/dists/{dist}/InRelease
+    if (p(4) === 'InRelease') {
       route.type = 'inrelease';
       return route;
     }
 
-    // /{owner}/{repo}/dists/{dist}/Release.gpg
-    if (parts[4] === 'Release.gpg') {
+    // /{owner}/{repo}(/prerelease)?/dists/{dist}/Release.gpg
+    if (p(4) === 'Release.gpg') {
       route.type = 'release-gpg';
       return route;
     }
 
-    // /{owner}/{repo}/dists/{dist}/Release
-    if (parts[4] === 'Release') {
+    // /{owner}/{repo}(/prerelease)?/dists/{dist}/Release
+    if (p(4) === 'Release') {
       route.type = 'release';
       return route;
     }
 
-    // /{owner}/{repo}/dists/{dist}/{component}/binary-{arch}/Packages[.gz]
-    if (parts[4] && parts[5]?.startsWith('binary-')) {
-      route.component = parts[4];
-      route.architecture = parts[5].replace('binary-', '');
+    // /{owner}/{repo}(/prerelease)?/dists/{dist}/{component}/binary-{arch}/Packages[.gz]
+    if (p(4) && p(5)?.startsWith('binary-')) {
+      route.component = p(4);
+      route.architecture = p(5).replace('binary-', '');
 
-      if (parts[6] === 'Packages') {
+      if (p(6) === 'Packages') {
         route.type = 'packages';
         return route;
       }
 
-      if (parts[6] === 'Packages.gz') {
+      if (p(6) === 'Packages.gz') {
         route.type = 'packages-gz';
         return route;
       }
 
-      // /{owner}/{repo}/dists/{dist}/{component}/binary-{arch}/by-hash/{hashType}/{hash}
-      if (parts[6] === 'by-hash' && parts[7] && parts[8]) {
+      // /{owner}/{repo}(/prerelease)?/dists/{dist}/{component}/binary-{arch}/by-hash/{hashType}/{hash}
+      if (p(6) === 'by-hash' && p(7) && p(8)) {
         route.type = 'by-hash';
-        route.hashType = parts[7]; // SHA256, SHA512, etc.
-        route.hash = parts[8];
+        route.hashType = p(7); // SHA256, SHA512, etc.
+        route.hash = p(8);
         return route;
       }
     }
   }
 
-  // /{owner}/{repo}/pool/{component}/{prefix}/{package}/{file}.deb
+  // /{owner}/{repo}(/prerelease)?/pool/{component}/{prefix}/{package}/{file}.deb
   // APT requests the full pool path from the Packages file's Filename field.
   // We extract just the filename (last segment) to match against GitHub assets.
-  if (parts[2] === 'pool') {
+  if (p(2) === 'pool') {
     const filename = parts[parts.length - 1];
     if (filename?.endsWith('.deb')) {
       route.type = 'binary';
@@ -236,59 +245,59 @@ export function parseRoute(pathname: string): RouteInfo {
   }
 
   // RPM Repository Routes
-  // /{owner}/{repo}/repodata/repomd.xml
-  if (parts[2] === 'repodata') {
-    if (parts[3] === 'repomd.xml') {
+  // /{owner}/{repo}(/prerelease)?/repodata/repomd.xml
+  if (p(2) === 'repodata') {
+    if (p(3) === 'repomd.xml') {
       route.type = 'repomd';
       return route;
     }
 
-    // /{owner}/{repo}/repodata/repomd.xml.asc
-    if (parts[3] === 'repomd.xml.asc') {
+    // /{owner}/{repo}(/prerelease)?/repodata/repomd.xml.asc
+    if (p(3) === 'repomd.xml.asc') {
       route.type = 'repomd-asc';
       return route;
     }
 
-    // /{owner}/{repo}/repodata/primary.xml
-    if (parts[3] === 'primary.xml') {
+    // /{owner}/{repo}(/prerelease)?/repodata/primary.xml
+    if (p(3) === 'primary.xml') {
       route.type = 'primary';
       return route;
     }
 
-    // /{owner}/{repo}/repodata/primary.xml.gz
-    if (parts[3] === 'primary.xml.gz') {
+    // /{owner}/{repo}(/prerelease)?/repodata/primary.xml.gz
+    if (p(3) === 'primary.xml.gz') {
       route.type = 'primary-gz';
       return route;
     }
 
-    // /{owner}/{repo}/repodata/filelists.xml
-    if (parts[3] === 'filelists.xml') {
+    // /{owner}/{repo}(/prerelease)?/repodata/filelists.xml
+    if (p(3) === 'filelists.xml') {
       route.type = 'filelists';
       return route;
     }
 
-    // /{owner}/{repo}/repodata/filelists.xml.gz
-    if (parts[3] === 'filelists.xml.gz') {
+    // /{owner}/{repo}(/prerelease)?/repodata/filelists.xml.gz
+    if (p(3) === 'filelists.xml.gz') {
       route.type = 'filelists-gz';
       return route;
     }
 
-    // /{owner}/{repo}/repodata/other.xml
-    if (parts[3] === 'other.xml') {
+    // /{owner}/{repo}(/prerelease)?/repodata/other.xml
+    if (p(3) === 'other.xml') {
       route.type = 'other';
       return route;
     }
 
-    // /{owner}/{repo}/repodata/other.xml.gz
-    if (parts[3] === 'other.xml.gz') {
+    // /{owner}/{repo}(/prerelease)?/repodata/other.xml.gz
+    if (p(3) === 'other.xml.gz') {
       route.type = 'other-gz';
       return route;
     }
   }
 
-  // /{owner}/{repo}/Packages/{file}.rpm
+  // /{owner}/{repo}(/prerelease)?/Packages/{file}.rpm
   // RPM package download - redirect to GitHub
-  if (parts[2] === 'Packages') {
+  if (p(2) === 'Packages') {
     const filename = parts[parts.length - 1];
     if (filename?.endsWith('.rpm')) {
       route.type = 'rpm-binary';
@@ -298,6 +307,19 @@ export function parseRoute(pathname: string): RouteInfo {
   }
 
   return route;
+}
+
+/**
+ * Aggregate assets from multiple releases into a single array with release context
+ */
+function aggregateAssets(releases: GitHubRelease[]): AggregatedAsset[] {
+  return releases.flatMap(release =>
+    release.assets.map(asset => ({
+      ...asset,
+      releaseTagName: release.tag_name,
+      releaseId: release.id,
+    }))
+  );
 }
 
 // GitHub raw URL for the README
@@ -484,12 +506,12 @@ async function handleInRelease(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const { owner, repo } = route;
+  const { owner, repo, releaseVariant } = route;
 
   // Check cache first - avoid GitHub API call if possible
-  const cachedReleaseId = await cache.getLatestReleaseId(owner, repo);
-  if (cachedReleaseId) {
-    const cachedInRelease = await cache.getInReleaseFile(owner, repo);
+  const cachedHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
+  if (cachedHash) {
+    const cachedInRelease = await cache.getInReleaseFile(owner, repo, releaseVariant);
     if (cachedInRelease) {
       // Verify cache is still valid by checking GitHub (but we already have content to serve)
       // Do validation in background to not block response
@@ -516,7 +538,7 @@ async function handleInRelease(
   }
 
   // Cache in background
-  ctx.waitUntil(cache.setInReleaseFile(owner, repo, response));
+  ctx.waitUntil(cache.setInReleaseFile(owner, repo, releaseVariant, response));
 
   return new Response(response, {
     headers: {
@@ -536,12 +558,12 @@ async function handleRelease(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const { owner, repo } = route;
+  const { owner, repo, releaseVariant } = route;
 
   // Check cache first
-  const cachedReleaseId = await cache.getLatestReleaseId(owner, repo);
-  if (cachedReleaseId) {
-    const cachedRelease = await cache.getReleaseFile(owner, repo);
+  const cachedHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
+  if (cachedHash) {
+    const cachedRelease = await cache.getReleaseFile(owner, repo, releaseVariant);
     if (cachedRelease) {
       ctx.waitUntil(validateAndRefreshCache(route, github, cache, env, ctx));
 
@@ -556,7 +578,7 @@ async function handleRelease(
 
   const releaseContent = await generateReleaseContent(route, github, cache, env, ctx);
 
-  ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseContent));
+  ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseVariant, releaseContent));
 
   return new Response(releaseContent, {
     headers: {
@@ -580,10 +602,10 @@ async function handleReleaseGpg(
     return new Response('No GPG key configured for signing', { status: 404 });
   }
 
-  const { owner, repo } = route;
+  const { owner, repo, releaseVariant } = route;
 
   // Check for cached signature first
-  const cachedSignature = await cache.getReleaseGpgSignature(owner, repo);
+  const cachedSignature = await cache.getReleaseGpgSignature(owner, repo, releaseVariant);
   if (cachedSignature) {
     // Validate in background
     ctx.waitUntil(validateAndRefreshCache(route, github, cache, env, ctx));
@@ -596,15 +618,15 @@ async function handleReleaseGpg(
   }
 
   // Get or generate Release content
-  let releaseContent = await cache.getReleaseFile(owner, repo);
+  let releaseContent = await cache.getReleaseFile(owner, repo, releaseVariant);
   if (!releaseContent) {
     releaseContent = await generateReleaseContent(route, github, cache, env, ctx);
-    ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseContent));
+    ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseVariant, releaseContent));
   }
 
   // Create detached signature and cache it
   const signature = await signDetached(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
-  ctx.waitUntil(cache.setReleaseGpgSignature(owner, repo, signature));
+  ctx.waitUntil(cache.setReleaseGpgSignature(owner, repo, releaseVariant, signature));
 
   return new Response(signature, {
     headers: {
@@ -625,13 +647,18 @@ async function validateAndRefreshCache(
   ctx: ExecutionContext
 ): Promise<void> {
   try {
-    const { owner, repo } = route;
-    const latestRelease = await github.getLatestRelease(owner, repo);
-    const needsRefresh = await cache.needsRefresh(owner, repo, latestRelease.id);
+    const { owner, repo, releaseVariant } = route;
+    const includePrerelease = releaseVariant === 'prerelease';
+    const releases = await github.getAllReleases(owner, repo, includePrerelease);
+
+    if (releases.length === 0) return;
+
+    const currentHash = computeReleaseIdsHash(releases);
+    const needsRefresh = await cache.needsRefresh(owner, repo, releaseVariant, currentHash);
 
     if (needsRefresh) {
       // Regenerate all cached content
-      await generateAndCacheAll(route, latestRelease, cache, env);
+      await generateAndCacheAll(route, releases, cache, env);
     }
   } catch (error) {
     console.error('Background cache validation failed:', error);
@@ -648,13 +675,21 @@ async function generateReleaseContent(
   env: Env,
   ctx: ExecutionContext
 ): Promise<string> {
-  const { owner, repo, component } = route;
+  const { owner, repo, component, releaseVariant } = route;
 
-  // Get latest release from GitHub
-  const latestRelease = await github.getLatestRelease(owner, repo);
+  // Get all releases from GitHub
+  const includePrerelease = releaseVariant === 'prerelease';
+  const releases = await github.getAllReleases(owner, repo, includePrerelease);
+
+  if (releases.length === 0) {
+    throw new Error(`No releases found for ${owner}/${repo}`);
+  }
+
+  // Aggregate assets from all releases
+  const allAssets = aggregateAssets(releases);
 
   // Detect architectures from available assets
-  const debAssets = filterDebAssets(latestRelease.assets);
+  const debAssets = filterDebAssets(allAssets);
   const architectures = getArchitecturesFromAssets(debAssets);
 
   // Generate Packages content for each architecture
@@ -664,11 +699,10 @@ async function generateReleaseContent(
     const archAssets = filterByArchitecture(debAssets, arch);
     if (archAssets.length === 0) continue;
 
-    const packages = await generatePackagesContent(
+    const packages = await generatePackagesContentMultiRelease(
       owner,
       repo,
-      latestRelease,
-      arch,
+      archAssets,
       env.GITHUB_TOKEN
     );
 
@@ -676,21 +710,22 @@ async function generateReleaseContent(
     packagesContentByArch.set(arch, content);
 
     // Cache each architecture's Packages file
-    ctx.waitUntil(cache.setPackagesFile(owner, repo, arch, content));
+    ctx.waitUntil(cache.setPackagesFile(owner, repo, arch, releaseVariant, content));
   }
 
-  // Build Release config with detected architectures and stable timestamp
+  // Build Release config with detected architectures and most recent release timestamp
   const config = {
     ...defaultReleaseConfig(owner, repo),
     architectures: architectures,
-    date: new Date(latestRelease.published_at),
+    date: new Date(releases[0].published_at), // Most recent release
   };
 
   // Build entries for all architectures
   const entries = await buildReleaseEntries(packagesContentByArch, component);
 
-  // Update cache metadata
-  ctx.waitUntil(cache.setLatestReleaseId(owner, repo, latestRelease.id));
+  // Update cache metadata with release IDs hash
+  const releaseIdsHash = computeReleaseIdsHash(releases);
+  ctx.waitUntil(cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseIdsHash));
 
   return generateReleaseFile(config, entries);
 }
@@ -700,13 +735,21 @@ async function generateReleaseContent(
  */
 async function generateAndCacheAll(
   route: RouteInfo,
-  latestRelease: { id: number; tag_name: string; published_at: string; assets: { name: string; size: number; browser_download_url: string }[] },
+  releases: GitHubRelease[],
   cache: CacheManager,
   env: Env
 ): Promise<void> {
-  const { owner, repo, component } = route;
+  const { owner, repo, component, releaseVariant } = route;
 
-  const debAssets = filterDebAssets(latestRelease.assets);
+  if (releases.length === 0) return;
+
+  // Aggregate assets from all releases
+  const allAssets = aggregateAssets(releases);
+
+  // Cache all asset URLs for efficient binary redirects
+  await cache.setAssetUrls(owner, repo, releaseVariant, allAssets);
+
+  const debAssets = filterDebAssets(allAssets);
   const architectures = getArchitecturesFromAssets(debAssets);
   const packagesContentByArch = new Map<string, string>();
 
@@ -714,38 +757,37 @@ async function generateAndCacheAll(
     const archAssets = filterByArchitecture(debAssets, arch);
     if (archAssets.length === 0) continue;
 
-    const packages = await generatePackagesContent(
+    const packages = await generatePackagesContentMultiRelease(
       owner,
       repo,
-      latestRelease,
-      arch,
+      archAssets,
       env.GITHUB_TOKEN
     );
 
     const content = generatePackagesFile(packages);
     packagesContentByArch.set(arch, content);
-    await cache.setPackagesFile(owner, repo, arch, content);
+    await cache.setPackagesFile(owner, repo, arch, releaseVariant, content);
   }
 
   const config = {
     ...defaultReleaseConfig(owner, repo),
     architectures: architectures,
-    date: new Date(latestRelease.published_at),
+    date: new Date(releases[0].published_at), // Most recent release
   };
 
   const entries = await buildReleaseEntries(packagesContentByArch, component);
   const releaseContent = generateReleaseFile(config, entries);
 
-  await cache.setReleaseFile(owner, repo, releaseContent);
-  await cache.setLatestReleaseId(owner, repo, latestRelease.id);
+  await cache.setReleaseFile(owner, repo, releaseVariant, releaseContent);
+  await cache.setReleaseIdsHash(owner, repo, releaseVariant, computeReleaseIdsHash(releases));
 
   if (env.GPG_PRIVATE_KEY) {
     const inRelease = await signCleartext(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
-    await cache.setInReleaseFile(owner, repo, inRelease);
+    await cache.setInReleaseFile(owner, repo, releaseVariant, inRelease);
 
     // Also cache Release.gpg for consistency
     const releaseGpg = await signDetached(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
-    await cache.setReleaseGpgSignature(owner, repo, releaseGpg);
+    await cache.setReleaseGpgSignature(owner, repo, releaseVariant, releaseGpg);
   }
 }
 
@@ -853,12 +895,12 @@ async function getPackagesContent(
   env: Env,
   ctx: ExecutionContext
 ): Promise<string> {
-  const { owner, repo, architecture } = route;
+  const { owner, repo, architecture, releaseVariant } = route;
 
   // Check cache first
-  const cachedReleaseId = await cache.getLatestReleaseId(owner, repo);
-  if (cachedReleaseId) {
-    const cached = await cache.getPackagesFile(owner, repo, architecture);
+  const cachedHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
+  if (cachedHash) {
+    const cached = await cache.getPackagesFile(owner, repo, architecture, releaseVariant);
     if (cached) {
       // Validate in background
       ctx.waitUntil(validateAndRefreshCache(route, github, cache, env, ctx));
@@ -867,23 +909,33 @@ async function getPackagesContent(
   }
 
   // Generate fresh packages content
-  const latestRelease = await github.getLatestRelease(owner, repo);
+  const includePrerelease = releaseVariant === 'prerelease';
+  const releases = await github.getAllReleases(owner, repo, includePrerelease);
 
-  const packages = await generatePackagesContent(
+  if (releases.length === 0) {
+    return ''; // No packages available
+  }
+
+  // Aggregate assets from all releases
+  const allAssets = aggregateAssets(releases);
+  const debAssets = filterDebAssets(allAssets);
+  const archAssets = filterByArchitecture(debAssets, architecture);
+
+  const packages = await generatePackagesContentMultiRelease(
     owner,
     repo,
-    latestRelease,
-    architecture,
+    archAssets,
     env.GITHUB_TOKEN
   );
 
   const content = generatePackagesFile(packages);
 
   // Cache in background
+  const releaseIdsHash = computeReleaseIdsHash(releases);
   ctx.waitUntil(
     Promise.all([
-      cache.setPackagesFile(owner, repo, architecture, content),
-      cache.setLatestReleaseId(owner, repo, latestRelease.id),
+      cache.setPackagesFile(owner, repo, architecture, releaseVariant, content),
+      cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseIdsHash),
     ])
   );
 
@@ -891,24 +943,19 @@ async function getPackagesContent(
 }
 
 /**
- * Generate packages content from GitHub release for a specific architecture
+ * Generate packages content from multiple releases for aggregated assets
  */
-async function generatePackagesContent(
+async function generatePackagesContentMultiRelease(
   owner: string,
   repo: string,
-  release: { id: number; tag_name: string; assets: { name: string; size: number; browser_download_url: string }[] },
-  architecture: string,
+  assets: AggregatedAsset[],
   githubToken?: string
 ): Promise<PackageEntry[]> {
-  // Filter to .deb files for this architecture
-  let assets = filterDebAssets(release.assets);
-  assets = filterByArchitecture(assets, architecture);
-
   // Build package entries in parallel (fetches metadata via Range requests)
   const entries = await Promise.all(
     assets.map(async (asset) => {
       try {
-        return await buildPackageEntry(asset, owner, repo, release.tag_name, githubToken);
+        return await buildPackageEntry(asset, owner, repo, asset.releaseTagName, githubToken);
       } catch (error) {
         console.error(`Failed to process ${asset.name}:`, error);
         return null;
@@ -921,32 +968,46 @@ async function generatePackagesContent(
 }
 
 /**
- * Handle binary (.deb) redirect to GitHub
+ * Handle binary (.deb/.rpm) redirect to GitHub
  *
  * APT requests files using the Filename from the Packages file, which uses
  * pool-style paths: pool/main/h/hello/hello_1.0_amd64.deb
  *
  * We extract just the filename (last segment) and find the matching
- * GitHub release asset to redirect to.
+ * GitHub release asset to redirect to. Uses cached URL when available,
+ * otherwise searches across ALL releases.
  */
 async function handleBinaryRedirect(
   route: RouteInfo,
   github: GitHubClient,
+  cache: CacheManager,
   packageType: 'deb' | 'rpm' = 'deb'
 ): Promise<Response> {
-  const { owner, repo, filename } = route;
+  const { owner, repo, filename, releaseVariant } = route;
   const typeName = packageType === 'deb' ? 'Asset' : 'RPM package';
 
   try {
-    const release = await github.getLatestRelease(owner, repo);
-    const asset = release.assets.find(a => a.name === filename);
-
-    if (!asset) {
-      return new Response(`${typeName} not found: ${filename}`, { status: 404 });
+    // Check cache first for the asset URL
+    const cachedUrl = await cache.getAssetUrl(owner, repo, filename, releaseVariant);
+    if (cachedUrl) {
+      return Response.redirect(cachedUrl, 302);
     }
 
-    // 302 redirect to GitHub's CDN - offloads bandwidth from Worker
-    return Response.redirect(asset.browser_download_url, 302);
+    // Cache miss - search across all releases for the requested asset
+    const includePrerelease = releaseVariant === 'prerelease';
+    const releases = await github.getAllReleases(owner, repo, includePrerelease);
+
+    for (const release of releases) {
+      const asset = release.assets.find(a => a.name === filename);
+      if (asset) {
+        // Cache the URL for next time
+        await cache.setAssetUrl(owner, repo, filename, releaseVariant, asset.browser_download_url);
+        // 302 redirect to GitHub's CDN - offloads bandwidth from Worker
+        return Response.redirect(asset.browser_download_url, 302);
+      }
+    }
+
+    return new Response(`${typeName} not found: ${filename}`, { status: 404 });
   } catch (error) {
     console.error(`${typeName} redirect failed:`, error);
     return new Response(`${typeName} not found`, { status: 404 });
@@ -968,12 +1029,12 @@ async function getRepomdWithSignature(
   env: Env,
   ctx: ExecutionContext
 ): Promise<{ repomd: string; signature: string | null }> {
-  const { owner, repo } = route;
+  const { owner, repo, releaseVariant } = route;
 
   // Check cache first
   const [cachedRepomd, cachedSignature] = await Promise.all([
-    cache.getRpmRepomd(owner, repo),
-    cache.getRpmRepomdAsc(owner, repo),
+    cache.getRpmRepomd(owner, repo, releaseVariant),
+    cache.getRpmRepomdAsc(owner, repo, releaseVariant),
   ]);
 
   // If we have cached content (and signature if GPG is configured), use it
@@ -996,8 +1057,8 @@ async function getRepomdWithSignature(
   // Cache both together in background
   ctx.waitUntil(
     Promise.all([
-      cache.setRpmRepomd(owner, repo, repomdXml),
-      signature ? cache.setRpmRepomdAsc(owner, repo, signature) : Promise.resolve(),
+      cache.setRpmRepomd(owner, repo, releaseVariant, repomdXml),
+      signature ? cache.setRpmRepomdAsc(owner, repo, releaseVariant, signature) : Promise.resolve(),
     ])
   );
 
@@ -1015,9 +1076,14 @@ async function validateAndRefreshRepomd(
   ctx: ExecutionContext
 ): Promise<void> {
   try {
-    const { owner, repo } = route;
-    const latestRelease = await github.getLatestRelease(owner, repo);
-    const needsRefresh = await cache.needsRefresh(owner, repo, latestRelease.id);
+    const { owner, repo, releaseVariant } = route;
+    const includePrerelease = releaseVariant === 'prerelease';
+    const releases = await github.getAllReleases(owner, repo, includePrerelease);
+
+    if (releases.length === 0) return;
+
+    const currentHash = computeReleaseIdsHash(releases);
+    const needsRefresh = await cache.needsRefresh(owner, repo, releaseVariant, currentHash);
 
     if (needsRefresh) {
       // Regenerate repomd and signature
@@ -1025,12 +1091,13 @@ async function validateAndRefreshRepomd(
       const repomdXml = await generateRepomdXml(files);
 
       const cachePromises: Promise<void>[] = [
-        cache.setRpmRepomd(owner, repo, repomdXml),
+        cache.setRpmRepomd(owner, repo, releaseVariant, repomdXml),
+        cache.setReleaseIdsHash(owner, repo, releaseVariant, currentHash),
       ];
 
       if (env.GPG_PRIVATE_KEY) {
         const signature = await signDetachedBinary(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
-        cachePromises.push(cache.setRpmRepomdAsc(owner, repo, signature));
+        cachePromises.push(cache.setRpmRepomdAsc(owner, repo, releaseVariant, signature));
       }
 
       await Promise.all(cachePromises);
@@ -1192,16 +1259,16 @@ async function getCachedRpmMetadata(
   env: Env,
   ctx: ExecutionContext
 ): Promise<CachedRpmMetadata> {
-  const { owner, repo } = route;
+  const { owner, repo, releaseVariant } = route;
 
   // Check cache first
-  const cachedReleaseId = await cache.getLatestReleaseId(owner, repo);
-  if (cachedReleaseId) {
+  const cachedHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
+  if (cachedHash) {
     const [cachedPrimary, cachedFilelists, cachedOther, cachedTimestamp] = await Promise.all([
-      cache.getRpmPrimaryXml(owner, repo),
-      cache.getRpmFilelistsXml(owner, repo),
-      cache.getRpmOtherXml(owner, repo),
-      cache.getRpmTimestamp(owner, repo),
+      cache.getRpmPrimaryXml(owner, repo, releaseVariant),
+      cache.getRpmFilelistsXml(owner, repo, releaseVariant),
+      cache.getRpmOtherXml(owner, repo, releaseVariant),
+      cache.getRpmTimestamp(owner, repo, releaseVariant),
     ]);
 
     if (cachedPrimary && cachedFilelists && cachedOther && cachedTimestamp) {
@@ -1218,21 +1285,37 @@ async function getCachedRpmMetadata(
   }
 
   // No cache - generate fresh content
-  const latestRelease = await github.getLatestRelease(owner, repo);
-  const packages = await buildRpmPackages(latestRelease.assets, env.GITHUB_TOKEN);
+  const includePrerelease = releaseVariant === 'prerelease';
+  const releases = await github.getAllReleases(owner, repo, includePrerelease);
+
+  if (releases.length === 0) {
+    // Return empty metadata if no releases
+    return {
+      primaryXml: generatePrimaryXml([]),
+      filelistsXml: generateFilelistsXml([]),
+      otherXml: generateOtherXml([]),
+      timestamp: Math.floor(Date.now() / 1000),
+    };
+  }
+
+  // Aggregate assets from all releases
+  const allAssets = aggregateAssets(releases);
+  const packages = await buildRpmPackages(allAssets, env.GITHUB_TOKEN);
   const metadata = generateRpmXmlMetadata(packages);
 
-  // Convert GitHub published_at to Unix timestamp
-  const timestamp = Math.floor(new Date(latestRelease.published_at).getTime() / 1000);
+  // Use most recent release's timestamp
+  const timestamp = Math.floor(new Date(releases[0].published_at).getTime() / 1000);
+  const releaseIdsHash = computeReleaseIdsHash(releases);
 
-  // Cache in background
+  // Cache in background (including asset URLs for efficient binary redirects)
   ctx.waitUntil(
     Promise.all([
-      cache.setRpmPrimaryXml(owner, repo, metadata.primaryXml),
-      cache.setRpmFilelistsXml(owner, repo, metadata.filelistsXml),
-      cache.setRpmOtherXml(owner, repo, metadata.otherXml),
-      cache.setRpmTimestamp(owner, repo, timestamp),
-      cache.setLatestReleaseId(owner, repo, latestRelease.id),
+      cache.setRpmPrimaryXml(owner, repo, releaseVariant, metadata.primaryXml),
+      cache.setRpmFilelistsXml(owner, repo, releaseVariant, metadata.filelistsXml),
+      cache.setRpmOtherXml(owner, repo, releaseVariant, metadata.otherXml),
+      cache.setRpmTimestamp(owner, repo, releaseVariant, timestamp),
+      cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseIdsHash),
+      cache.setAssetUrls(owner, repo, releaseVariant, allAssets),
     ])
   );
 
@@ -1250,21 +1333,28 @@ async function validateAndRefreshRpmCache(
   ctx: ExecutionContext
 ): Promise<void> {
   try {
-    const { owner, repo } = route;
-    const latestRelease = await github.getLatestRelease(owner, repo);
-    const needsRefresh = await cache.needsRefresh(owner, repo, latestRelease.id);
+    const { owner, repo, releaseVariant } = route;
+    const includePrerelease = releaseVariant === 'prerelease';
+    const releases = await github.getAllReleases(owner, repo, includePrerelease);
+
+    if (releases.length === 0) return;
+
+    const currentHash = computeReleaseIdsHash(releases);
+    const needsRefresh = await cache.needsRefresh(owner, repo, releaseVariant, currentHash);
 
     if (needsRefresh) {
-      const packages = await buildRpmPackages(latestRelease.assets, env.GITHUB_TOKEN);
+      // Aggregate assets from all releases
+      const allAssets = aggregateAssets(releases);
+      const packages = await buildRpmPackages(allAssets, env.GITHUB_TOKEN);
       const metadata = generateRpmXmlMetadata(packages);
-      const timestamp = Math.floor(new Date(latestRelease.published_at).getTime() / 1000);
+      const timestamp = Math.floor(new Date(releases[0].published_at).getTime() / 1000);
 
       await Promise.all([
-        cache.setRpmPrimaryXml(owner, repo, metadata.primaryXml),
-        cache.setRpmFilelistsXml(owner, repo, metadata.filelistsXml),
-        cache.setRpmOtherXml(owner, repo, metadata.otherXml),
-        cache.setRpmTimestamp(owner, repo, timestamp),
-        cache.setLatestReleaseId(owner, repo, latestRelease.id),
+        cache.setRpmPrimaryXml(owner, repo, releaseVariant, metadata.primaryXml),
+        cache.setRpmFilelistsXml(owner, repo, releaseVariant, metadata.filelistsXml),
+        cache.setRpmOtherXml(owner, repo, releaseVariant, metadata.otherXml),
+        cache.setRpmTimestamp(owner, repo, releaseVariant, timestamp),
+        cache.setReleaseIdsHash(owner, repo, releaseVariant, currentHash),
       ]);
     }
   } catch (error) {

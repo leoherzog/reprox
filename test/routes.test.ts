@@ -245,6 +245,96 @@ describe('parseRoute', () => {
   });
 
   // ============================================================================
+  // Prerelease Variant Routes
+  // ============================================================================
+
+  describe('prerelease variant routes', () => {
+    it('defaults to stable variant', () => {
+      const route = parseRoute('/owner/repo/dists/stable/InRelease');
+      expect(route.releaseVariant).toBe('stable');
+    });
+
+    it('detects prerelease variant in APT InRelease path', () => {
+      const route = parseRoute('/owner/repo/prerelease/dists/stable/InRelease');
+      expect(route.type).toBe('inrelease');
+      expect(route.releaseVariant).toBe('prerelease');
+      expect(route.distribution).toBe('stable');
+    });
+
+    it('detects prerelease variant in APT Release path', () => {
+      const route = parseRoute('/owner/repo/prerelease/dists/focal/Release');
+      expect(route.type).toBe('release');
+      expect(route.releaseVariant).toBe('prerelease');
+      expect(route.distribution).toBe('focal');
+    });
+
+    it('detects prerelease variant in APT Release.gpg path', () => {
+      const route = parseRoute('/owner/repo/prerelease/dists/jammy/Release.gpg');
+      expect(route.type).toBe('release-gpg');
+      expect(route.releaseVariant).toBe('prerelease');
+    });
+
+    it('detects prerelease variant in APT Packages path', () => {
+      const route = parseRoute('/owner/repo/prerelease/dists/stable/main/binary-amd64/Packages');
+      expect(route.type).toBe('packages');
+      expect(route.releaseVariant).toBe('prerelease');
+      expect(route.architecture).toBe('amd64');
+    });
+
+    it('detects prerelease variant in APT Packages.gz path', () => {
+      const route = parseRoute('/owner/repo/prerelease/dists/stable/main/binary-arm64/Packages.gz');
+      expect(route.type).toBe('packages-gz');
+      expect(route.releaseVariant).toBe('prerelease');
+    });
+
+    it('detects prerelease variant in APT by-hash path', () => {
+      const hash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+      const route = parseRoute(`/owner/repo/prerelease/dists/stable/main/binary-amd64/by-hash/SHA256/${hash}`);
+      expect(route.type).toBe('by-hash');
+      expect(route.releaseVariant).toBe('prerelease');
+      expect(route.hash).toBe(hash);
+    });
+
+    it('detects prerelease variant in APT pool path', () => {
+      const route = parseRoute('/owner/repo/prerelease/pool/main/h/hello/hello_1.0.0_amd64.deb');
+      expect(route.type).toBe('binary');
+      expect(route.releaseVariant).toBe('prerelease');
+      expect(route.filename).toBe('hello_1.0.0_amd64.deb');
+    });
+
+    it('detects prerelease variant in RPM repomd.xml path', () => {
+      const route = parseRoute('/owner/repo/prerelease/repodata/repomd.xml');
+      expect(route.type).toBe('repomd');
+      expect(route.releaseVariant).toBe('prerelease');
+    });
+
+    it('detects prerelease variant in RPM repomd.xml.asc path', () => {
+      const route = parseRoute('/owner/repo/prerelease/repodata/repomd.xml.asc');
+      expect(route.type).toBe('repomd-asc');
+      expect(route.releaseVariant).toBe('prerelease');
+    });
+
+    it('detects prerelease variant in RPM primary.xml.gz path', () => {
+      const route = parseRoute('/owner/repo/prerelease/repodata/primary.xml.gz');
+      expect(route.type).toBe('primary-gz');
+      expect(route.releaseVariant).toBe('prerelease');
+    });
+
+    it('detects prerelease variant in RPM Packages path', () => {
+      const route = parseRoute('/owner/repo/prerelease/Packages/hello-1.0.0-1.x86_64.rpm');
+      expect(route.type).toBe('rpm-binary');
+      expect(route.releaseVariant).toBe('prerelease');
+      expect(route.filename).toBe('hello-1.0.0-1.x86_64.rpm');
+    });
+
+    it('detects prerelease variant in public.key path', () => {
+      const route = parseRoute('/owner/repo/prerelease/public.key');
+      expect(route.type).toBe('public-key');
+      expect(route.releaseVariant).toBe('prerelease');
+    });
+  });
+
+  // ============================================================================
   // Real-world Examples
   // ============================================================================
 

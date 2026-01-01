@@ -21,6 +21,7 @@ export interface RouteInfo {
   filename: string;
   hashType?: string;  // For by-hash routes: SHA256, SHA512, etc.
   hash?: string;      // The actual hash value
+  releaseVariant: 'stable' | 'prerelease';  // Whether to include prerelease versions
   type:
     | 'packages' | 'packages-gz' | 'release' | 'release-gpg' | 'inrelease'
     | 'by-hash'
@@ -37,6 +38,7 @@ export interface GitHubRelease {
   name: string;
   body: string;
   published_at: string;
+  prerelease: boolean;
   assets: GitHubAsset[];
 }
 
@@ -159,3 +161,11 @@ export interface RpmPackageEntry {
  * Minimal asset type for filtering (subset of GitHubAsset)
  */
 export type AssetLike = { name: string; size: number; browser_download_url: string; digest?: string };
+
+/**
+ * Asset with release context for multi-release aggregation
+ */
+export interface AggregatedAsset extends GitHubAsset {
+  releaseTagName: string;
+  releaseId: number;
+}

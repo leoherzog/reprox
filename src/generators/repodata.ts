@@ -233,10 +233,14 @@ export async function buildRpmPackageEntry(
 }
 
 /**
- * Filter GitHub assets to only .rpm files
+ * Filter GitHub assets to only .rpm files that have valid SHA256 checksums.
+ * Assets without digests (older GitHub releases) are excluded because DNF
+ * requires valid checksums for all packages.
  */
 export function filterRpmAssets<T extends AssetLike>(assets: T[]): T[] {
   return assets.filter(asset =>
-    asset.name.endsWith('.rpm') && !asset.name.includes('.src.rpm')
+    asset.name.endsWith('.rpm') &&
+    !asset.name.includes('.src.rpm') &&
+    asset.digest?.startsWith('sha256:')
   );
 }

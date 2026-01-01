@@ -6,6 +6,12 @@ This file provides guidance to AI Agents like Claude, Gemini, Codex, and others 
 
 Reprox is a serverless APT/RPM repository gateway that transforms GitHub Releases into fully compliant package repositories on-the-fly. It runs on Cloudflare Workers, uses HTTP Range Requests to extract only package headers (avoiding full downloads), and caches metadata using the Workers Cache API.
 
+**Key Features:**
+- Serves packages from **all GitHub releases** (not just the latest)
+- Supports **prerelease variant** via `/prerelease` path segment
+- Only includes packages with valid **SHA256 digests** (GitHub added this feature in June 2025)
+- Uses **pagination** with `per_page=100` (up to 5,000 releases max)
+
 ## Common Commands
 
 ```bash
@@ -18,16 +24,35 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 ## Architecture
 
 ### Request Flow
-1. **Entry Point** (`src/index.ts`) - Routes requests based on URL pattern, validates GitHub owner/repo naming
-2. **GitHub Client** (`src/github/api.ts`) - Fetches latest release info via GitHub API
-3. **Parsers** (`src/parsers/`) - Extract package metadata using Range Requests (64KB for .deb, 256KB for .rpm)
-4. **Generators** (`src/generators/`) - Generate repository metadata files (Packages, Release, repomd.xml, etc.)
-5. **Cache** (`src/cache/cache.ts`) - Cache API-based caching with release ID validation for freshness
+1. **Entry Point** (`src/index.ts`) - Routes requests based on URL pattern, detects prerelease variant
+2. **GitHub Client** (`src/github/api.ts`) - Fetches all releases with pagination via `getAllReleases()`
+3. **Asset Aggregation** - Combines assets from all releases into a unified package list
+4. **Parsers** (`src/parsers/`) - Extract package metadata using Range Requests (64KB for .deb, 256KB for .rpm)
+5. **Generators** (`src/generators/`) - Generate repository metadata files (Packages, Release, repomd.xml, etc.)
+6. **Cache** (`src/cache/cache.ts`) - Cache API with release IDs hash validation for freshness
 
 ### URL Routes
+
+**Standard (excludes prereleases):**
 - **APT**: `/{owner}/{repo}/dists/{dist}/InRelease`, `/{owner}/{repo}/pool/.../*.deb`
 - **RPM**: `/{owner}/{repo}/repodata/repomd.xml`, `/{owner}/{repo}/Packages/*.rpm`
 - **Common**: `/{owner}/{repo}/public.key`
+
+**Prerelease Variant (includes all releases):**
+- **APT**: `/{owner}/{repo}/prerelease/dists/{dist}/InRelease`, etc.
+- **RPM**: `/{owner}/{repo}/prerelease/repodata/repomd.xml`, etc.
+- **Common**: `/{owner}/{repo}/prerelease/public.key`
+
+### Key Types
+
+**RouteInfo** (`src/types.ts`) - Parsed URL information:
+- `owner`, `repo` - GitHub repository
+- `releaseVariant` - `'stable'` (default) or `'prerelease'`
+- `type` - Route type (inrelease, packages, binary, repomd, rpm-binary, etc.)
+
+**AggregatedAsset** (`src/types.ts`) - Asset with release context:
+- Extends `GitHubAsset` with `releaseTagName` and `releaseId`
+- Used to track which release each package came from
 
 ### Key Modules
 
@@ -38,9 +63,9 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - `rpm.ts` - RPM header parsing with binary tag structure
 
 **Generators** (`src/generators/`)
-- `packages.ts` - APT Packages file generation
+- `packages.ts` - APT Packages file generation, `filterDebAssets()` (requires valid digest)
 - `release.ts` - APT Release/InRelease generation
-- `repodata.ts` - RPM primary.xml, filelists.xml, other.xml generation
+- `repodata.ts` - RPM primary.xml, filelists.xml, other.xml generation, `filterRpmAssets()` (requires valid digest)
 
 **Utilities** (`src/utils/`)
 - `crypto.ts` - SHA256 hashing and gzip compression (Web Crypto API)
@@ -50,16 +75,47 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 
 **Other**
 - `src/signing/gpg.ts` - OpenPGP signing (cleartext and detached)
-- `src/github/api.ts` - GitHub API client for release info
-- `src/cache/cache.ts` - Cache API wrapper with release ID validation
+- `src/github/api.ts` - GitHub API client with `getAllReleases()` pagination
+- `src/cache/cache.ts` - Cache API wrapper with variant-aware keys
 - `src/lib/xz.ts` - XZ decompression wrapper for Workers (see below)
 
 ### Design Patterns
-- **Range Requests**: Only fetches package headers to minimize bandwidth
-- **Release ID Caching**: Cache invalidation triggered by new GitHub releases
-- **Architecture Detection**: Parses architecture from filename patterns
-  - Debian: amd64, arm64, i386, armhf, all
-  - RPM: x86_64, aarch64, i686, noarch
+
+**Multi-Release Aggregation:**
+- `getAllReleases()` fetches all releases with pagination (`per_page=100`, max 50 pages = 5,000 releases)
+- `aggregateAssets()` flattens assets from all releases with release context
+- Prerelease filtering: `includePrerelease` parameter controls whether to include prereleases
+
+**Digest Filtering:**
+- GitHub added SHA256 digests to release assets in June 2025
+- `filterDebAssets()` and `filterRpmAssets()` only include packages with valid `digest` field
+- Older releases without digests are excluded (package managers require valid checksums)
+
+**Cache Strategy:**
+- All cache keys include `variant` (stable/prerelease) for isolation
+- Release IDs hash (`computeReleaseIdsHash()`) detects when releases change
+- Asset URLs are cached for efficient binary redirects
+- Background validation refreshes cache without blocking requests
+
+**Range Requests:** Only fetches package headers to minimize bandwidth (64KB for .deb, 256KB for .rpm)
+
+**Architecture Detection:** Parses architecture from filename patterns
+- Debian: amd64, arm64, i386, armhf, all
+- RPM: x86_64, aarch64, i686, noarch
+
+### Cache Keys
+
+All cache keys include the release variant for proper isolation:
+
+| Type | Key Pattern |
+|------|-------------|
+| APT Packages | `packages/{variant}/{owner}/{repo}/{arch}` |
+| APT Release | `release/{variant}/{owner}/{repo}` |
+| APT InRelease | `inrelease/{variant}/{owner}/{repo}` |
+| Release IDs Hash | `release-ids-hash/{variant}/{owner}/{repo}` |
+| Asset URL | `asset-url/{variant}/{owner}/{repo}/{filename}` |
+| RPM Primary | `rpm/primary/{variant}/{owner}/{repo}` |
+| RPM Repomd | `rpm/repomd/{variant}/{owner}/{repo}` |
 
 ### Cloudflare Workers Considerations
 
@@ -84,8 +140,8 @@ Optional secrets (set via `wrangler secret put`):
 - `GPG_PRIVATE_KEY` - Armored GPG private key for repository signing (public key is auto-extracted)
 - `GPG_PASSPHRASE` - Passphrase for encrypted GPG private keys (optional, only needed if key is passphrase-protected)
 - `GPG_PUBLIC_KEY` - Armored GPG public key (optional override, normally extracted from private key)
-- `GITHUB_TOKEN` - GitHub personal access token for higher API rate limits
-- `CACHE_TTL` - Cache TTL in seconds for content (default: 86400). Release IDs use a 5-minute TTL for freshness checks.
+- `GITHUB_TOKEN` - GitHub personal access token for higher API rate limits (recommended for multi-release pagination)
+- `CACHE_TTL` - Cache TTL in seconds for content (default: 86400). Release IDs hash uses a 5-minute TTL for freshness checks.
 
 ## Testing
 
@@ -162,7 +218,7 @@ Integration tests in `test/integration/` fetch real packages from GitHub release
 
 5. **Configure GitHub token (recommended)**
 
-   A GitHub personal access token increases API rate limits from 60 to 5,000 requests/hour:
+   A GitHub personal access token increases API rate limits from 60 to 5,000 requests/hour. This is especially important for repositories with lots of Releases, given many API calls and pagination:
 
    ```bash
    npx wrangler secret put GITHUB_TOKEN
@@ -218,6 +274,9 @@ curl https://your-worker.workers.dev/
 # Test a real repository (replace with an actual GitHub repo with .deb/.rpm releases)
 curl https://your-worker.workers.dev/{owner}/{repo}/public.key
 curl https://your-worker.workers.dev/{owner}/{repo}/dists/stable/InRelease
+
+# Test prerelease variant (includes prereleases)
+curl https://your-worker.workers.dev/{owner}/{repo}/prerelease/dists/stable/InRelease
 ```
 
 ### Updating
@@ -235,3 +294,17 @@ npm run dev        # Starts local dev server with wrangler
 npm run test       # Run test suite
 npm run typecheck  # TypeScript type checking
 ```
+
+## Important Implementation Notes
+
+### Digest Requirement
+
+GitHub added SHA256 digests to release assets in June 2025. Packages from older releases that lack digests are **excluded** from the repository because package managers (apt, dnf) require valid checksums. This is intentional - there's no way to verify package integrity without checksums.
+
+### Pagination Limits
+
+The `getAllReleases()` function has a `MAX_PAGES = 50` limit to prevent infinite loops and API exhaustion. With `per_page=100`, this allows up to 5,000 releases per repository.
+
+### Cache Consistency
+
+All derived artifacts (InRelease, Release.gpg, repomd.xml) are generated and cached together to ensure checksums match. The gzip compression uses consistent output to avoid checksum mismatches between cached repomd.xml and served .xml.gz files.

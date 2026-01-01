@@ -182,53 +182,169 @@ describe('GitHubClient', () => {
     vi.unstubAllGlobals();
   });
 
-  describe('getLatestRelease', () => {
-    it('fetches latest release successfully', async () => {
-      const mockRelease = {
-        id: 123,
-        tag_name: 'v1.0.0',
-        name: 'Version 1.0.0',
-        body: 'Release notes',
-        published_at: '2024-01-01T00:00:00Z',
-        assets: [
-          {
-            id: 456,
-            name: 'package_1.0.0_amd64.deb',
-            size: 1000,
-            browser_download_url: 'https://github.com/owner/repo/releases/download/v1.0.0/package_1.0.0_amd64.deb',
-            content_type: 'application/vnd.debian.binary-package',
-          },
-        ],
-      };
+  describe('getAllReleases', () => {
+    const createMockRelease = (id: number, prerelease: boolean = false) => ({
+      id,
+      tag_name: `v${id}.0.0`,
+      name: `Version ${id}.0.0`,
+      body: 'Release notes',
+      published_at: '2024-01-01T00:00:00Z',
+      prerelease,
+      assets: [
+        {
+          id: id * 100,
+          name: `package_${id}.0.0_amd64.deb`,
+          size: 1000,
+          browser_download_url: `https://github.com/owner/repo/releases/download/v${id}.0.0/package_${id}.0.0_amd64.deb`,
+          content_type: 'application/vnd.debian.binary-package',
+        },
+      ],
+    });
+
+    it('fetches all releases from single page', async () => {
+      const mockReleases = [createMockRelease(1), createMockRelease(2)];
 
       vi.mocked(fetch).mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve(mockRelease),
+        json: () => Promise.resolve(mockReleases),
       } as Response);
 
       const client = new GitHubClient();
-      const release = await client.getLatestRelease('owner', 'repo');
+      const releases = await client.getAllReleases('owner', 'repo');
 
-      expect(release).toEqual(mockRelease);
+      expect(releases).toHaveLength(2);
+      expect(fetch).toHaveBeenCalledTimes(1);
       expect(fetch).toHaveBeenCalledWith(
-        'https://api.github.com/repos/owner/repo/releases/latest',
-        expect.objectContaining({
-          headers: expect.objectContaining({
-            Accept: 'application/vnd.github.v3+json',
-            'User-Agent': 'Reprox/1.0',
-          }),
-        })
+        'https://api.github.com/repos/owner/repo/releases?per_page=100&page=1',
+        expect.any(Object)
       );
+    });
+
+    it('paginates through multiple pages', async () => {
+      // First page: 100 releases, second page: 50 releases
+      const page1 = Array.from({ length: 100 }, (_, i) => createMockRelease(i + 1));
+      const page2 = Array.from({ length: 50 }, (_, i) => createMockRelease(i + 101));
+
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(page1),
+        } as Response)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(page2),
+        } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo');
+
+      expect(releases).toHaveLength(150);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch).toHaveBeenNthCalledWith(
+        1,
+        'https://api.github.com/repos/owner/repo/releases?per_page=100&page=1',
+        expect.any(Object)
+      );
+      expect(fetch).toHaveBeenNthCalledWith(
+        2,
+        'https://api.github.com/repos/owner/repo/releases?per_page=100&page=2',
+        expect.any(Object)
+      );
+    });
+
+    it('stops pagination on empty page', async () => {
+      const page1 = [createMockRelease(1)];
+
+      vi.mocked(fetch)
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(page1),
+        } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo');
+
+      expect(releases).toHaveLength(1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('filters out prereleases by default', async () => {
+      const mockReleases = [
+        createMockRelease(1, false),
+        createMockRelease(2, true),  // prerelease
+        createMockRelease(3, false),
+        createMockRelease(4, true),  // prerelease
+      ];
+
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockReleases),
+      } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo');
+
+      expect(releases).toHaveLength(2);
+      expect(releases.every(r => !r.prerelease)).toBe(true);
+    });
+
+    it('includes prereleases when includePrerelease=true', async () => {
+      const mockReleases = [
+        createMockRelease(1, false),
+        createMockRelease(2, true),
+        createMockRelease(3, false),
+        createMockRelease(4, true),
+      ];
+
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockReleases),
+      } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo', true);
+
+      expect(releases).toHaveLength(4);
+      expect(releases.filter(r => r.prerelease)).toHaveLength(2);
+    });
+
+    it('returns empty array when no releases exist', async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve([]),
+      } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo');
+
+      expect(releases).toEqual([]);
+    });
+
+    it('returns empty array when all releases are prereleases and filtering', async () => {
+      const mockReleases = [
+        createMockRelease(1, true),
+        createMockRelease(2, true),
+      ];
+
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockReleases),
+      } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo', false);
+
+      expect(releases).toEqual([]);
     });
 
     it('includes auth token when provided', async () => {
       vi.mocked(fetch).mockResolvedValue({
         ok: true,
-        json: () => Promise.resolve({ id: 1, assets: [] }),
+        json: () => Promise.resolve([]),
       } as Response);
 
       const client = new GitHubClient('test-token');
-      await client.getLatestRelease('owner', 'repo');
+      await client.getAllReleases('owner', 'repo');
 
       expect(fetch).toHaveBeenCalledWith(
         expect.any(String),
@@ -240,7 +356,7 @@ describe('GitHubClient', () => {
       );
     });
 
-    it('throws on 404 with descriptive message', async () => {
+    it('throws on 404', async () => {
       vi.mocked(fetch).mockResolvedValue({
         ok: false,
         status: 404,
@@ -249,21 +365,8 @@ describe('GitHubClient', () => {
 
       const client = new GitHubClient();
 
-      await expect(client.getLatestRelease('owner', 'repo'))
+      await expect(client.getAllReleases('owner', 'repo'))
         .rejects.toThrow('Repository owner/repo not found or has no releases');
-    });
-
-    it('throws on other HTTP errors', async () => {
-      vi.mocked(fetch).mockResolvedValue({
-        ok: false,
-        status: 500,
-        statusText: 'Internal Server Error',
-      } as Response);
-
-      const client = new GitHubClient();
-
-      await expect(client.getLatestRelease('owner', 'repo'))
-        .rejects.toThrow('GitHub API error: 500 Internal Server Error');
     });
 
     it('throws on rate limit error (403)', async () => {
@@ -275,7 +378,7 @@ describe('GitHubClient', () => {
 
       const client = new GitHubClient();
 
-      await expect(client.getLatestRelease('owner', 'repo'))
+      await expect(client.getAllReleases('owner', 'repo'))
         .rejects.toThrow('GitHub API rate limit exceeded');
     });
 
@@ -288,8 +391,38 @@ describe('GitHubClient', () => {
 
       const client = new GitHubClient();
 
-      await expect(client.getLatestRelease('owner', 'repo'))
+      await expect(client.getAllReleases('owner', 'repo'))
         .rejects.toThrow('GitHub API rate limit exceeded');
+    });
+
+    it('throws on other HTTP errors', async () => {
+      vi.mocked(fetch).mockResolvedValue({
+        ok: false,
+        status: 500,
+        statusText: 'Internal Server Error',
+      } as Response);
+
+      const client = new GitHubClient();
+
+      await expect(client.getAllReleases('owner', 'repo'))
+        .rejects.toThrow('GitHub API error: 500 Internal Server Error');
+    });
+
+    it('respects max page limit to prevent infinite loops', async () => {
+      // Always return exactly 100 items to simulate infinite pagination
+      const fullPage = Array.from({ length: 100 }, (_, i) => createMockRelease(i + 1));
+
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(fullPage),
+      } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo');
+
+      // Should stop at MAX_PAGES (50) * 100 = 5000 releases
+      expect(fetch).toHaveBeenCalledTimes(50);
+      expect(releases).toHaveLength(5000);
     });
   });
 });

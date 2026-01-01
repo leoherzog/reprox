@@ -5,6 +5,8 @@ There are many great Linux softwares that distribute .deb and/or .rpm packages v
 
 I made this for my own personal use, so I didn't have to "Watch" for new Github Releases and manually download/install updates. I recognize that I am man-in-the-middling the traditional trust model for package repositories. Be careful to add only trusted, official upstream Github repositories. If you're worried about me man-in-the-middleing you, skip ahead to [the Self-Hosting section](#self-hosting).
 
+Supports all Releases since [June 2025](https://github.blog/changelog/2025-06-03-releases-now-expose-digests-for-release-assets/). Older releases will not appear in the package repository.
+
 ## Usage
 
 ### APT (Debian/Ubuntu)
@@ -82,7 +84,7 @@ npx wrangler secret put GITHUB_TOKEN
 npm run deploy
 ```
 
-To update, fetch and checkout the latest tagged Release:
+To update, `fetch` and `checkout` the latest tagged Release:
 ```bash
 # git clone git@github.com:leoherzog/reprox.git
 git fetch --tags && git checkout $(git tag --sort=-version:refname | head -n1) && npm install && npm run deploy
