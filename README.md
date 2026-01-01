@@ -10,6 +10,8 @@ I made this for my own personal use, so I didn't have to "Watch" for new Github 
 ### APT (Debian/Ubuntu)
 
 ```bash
+# Replace {owner}, {repo}, and {package} with the Github repository and package name
+
 # Optional: verify the key fingerprint before importing
 curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | gpg --show-keys
 # Verify the instance's fingerprint by browsing to it in your web browser
@@ -18,7 +20,6 @@ curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | gpg --show-keys
 curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | \
   sudo gpg --dearmor -o /etc/apt/keyrings/{repo}.gpg
 
-# Add the repository, replacing `{owner}`, `{repo}`, and `{package}` with your GitHub repository details and package name
 echo "deb [signed-by=/etc/apt/keyrings/{repo}.gpg] https://reprox.dev/{owner}/{repo} stable main" | \
   sudo tee /etc/apt/sources.list.d/{repo}.list
 
@@ -29,7 +30,8 @@ sudo apt update && sudo apt install {package}
 ### RPM (Fedora/RHEL/CentOS)
 
 ```bash
-# Add the repository, replacing `{owner}`, `{repo}`, and `{package}` with your GitHub repository details and package name
+# Replace {owner}, {repo}, and {package} with the Github repository and package name
+# 
 sudo tee /etc/yum.repos.d/{repo}.repo << EOF
 [{repo}]
 name={repo} from GitHub via Reprox
@@ -44,8 +46,8 @@ sudo dnf install {package}
 # Optional: verify the key fingerprint on first update/install
 # Verify the instance's fingerprint by browsing to it in your web browser
 ```
-
-Note: `gpgcheck=0` disables individual package signature verification because Reprox redirects downloads to GitHub without re-signing. Package integrity is still verified via checksums in the signed repository metadata (`repo_gpgcheck=1`).
+> [!NOTE]
+> Note: `gpgcheck=0` disables individual package signature verification because Reprox redirects downloads to GitHub without re-signing. Package integrity is still verified via checksums in the signed repository metadata (`repo_gpgcheck=1`).
 
 ## Self-Hosting
 
@@ -88,4 +90,6 @@ git fetch --tags && git checkout $(git tag --sort=-version:refname | head -n1) &
 
 ## About Me
 
-♥ [Leo Herzog](https://herzog.tech). [🍵 Buy me a tea!](https://herzog.tech/$)
+♥ [Leo Herzog](https://herzog.tech)
+
+[🍵 Buy me a tea!](https://herzog.tech/$)
