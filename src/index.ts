@@ -55,7 +55,10 @@ export default {
       // Handle root path - serve README from GitHub with dynamic replacements
       if (url.pathname === '/' || url.pathname === '') {
         const cache = createCacheManager(env.CACHE_TTL);
-        return handleReadme(url, cache, env, ctx);
+        if (url.searchParams.get('cache') === 'false') {
+          await cache.clearReadme();
+        }
+        return handleReadme(request, url, cache, env, ctx);
       }
 
       // Validate route has owner/repo
@@ -300,6 +303,7 @@ const README_RAW_URL = 'https://raw.githubusercontent.com/leoherzog/reprox/main/
  * with dynamic baseUrl and fingerprint replacements
  */
 async function handleReadme(
+  request: Request,
   url: URL,
   cache: CacheManager,
   env: Env,
@@ -353,6 +357,54 @@ async function handleReadme(
   } else {
     // Remove the fingerprint comment lines if no key is configured
     content = content.replace(/# Verify the instance's fingerprint by browsing to it in your web browser\n/g, '');
+  }
+
+  // Check if browser wants HTML
+  const acceptHeader = request.headers.get('Accept') || '';
+  const wantsHtml = acceptHeader.includes('text/html');
+
+  if (wantsHtml) {
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reprox</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@latest/github-markdown.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/styles/github.min.css" media="(prefers-color-scheme: light)">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
+  <style>
+    .markdown-body {
+      box-sizing: border-box;
+      min-width: 200px;
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 45px;
+    }
+    @media (max-width: 767px) {
+      .markdown-body { padding: 15px; }
+    }
+  </style>
+</head>
+<body class="markdown-body">
+  <div id="content"></div>
+  <script src="https://cdn.jsdelivr.net/npm/marked@latest/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked-alert@latest/dist/index.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@latest/build/highlight.min.js"></script>
+  <script>
+    marked.use(markedAlert());
+    document.getElementById('content').innerHTML = marked.parse(${JSON.stringify(content)});
+    hljs.highlightAll();
+  </script>
+</body>
+</html>`;
+    return new Response(html, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'public, max-age=300',
+      },
+    });
   }
 
   return new Response(content, {

@@ -345,6 +345,14 @@ export class CacheManager {
   }
 
   /**
+   * Clear cached README content
+   */
+  async clearReadme(): Promise<void> {
+    const key = this.readmeKey();
+    await this.cache.delete(this.createCacheRequest(key));
+  }
+
+  /**
    * Clear all cached content for a repository
    */
   async clearAllCache(owner: string, repo: string): Promise<void> {
