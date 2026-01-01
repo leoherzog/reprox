@@ -47,7 +47,7 @@ sudo dnf install {package}
 # Verify the instance's fingerprint by browsing to it in your web browser
 ```
 > [!NOTE]
-> Note: `gpgcheck=0` disables individual package signature verification because Reprox redirects downloads to GitHub without re-signing. Package integrity is still verified via checksums in the signed repository metadata (`repo_gpgcheck=1`).
+> `gpgcheck=0` disables individual package signature verification because Reprox redirects downloads to GitHub without re-signing. Package integrity is still verified via checksums in the signed repository metadata (`repo_gpgcheck=1`).
 
 ## Self-Hosting
 
