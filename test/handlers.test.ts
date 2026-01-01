@@ -18,10 +18,22 @@ function createMockEnv(overrides: Partial<Env> = {}): Env {
   };
 }
 
-function createMockExecutionContext(): ExecutionContext {
+interface MockExecutionContext extends ExecutionContext {
+  waitUntilPromises: Promise<unknown>[];
+  flushWaitUntil: () => Promise<void>;
+}
+
+function createMockExecutionContext(): MockExecutionContext {
+  const waitUntilPromises: Promise<unknown>[] = [];
   return {
-    waitUntil: vi.fn(),
+    waitUntil: vi.fn((promise: Promise<unknown>) => {
+      waitUntilPromises.push(promise);
+    }),
     passThroughOnException: vi.fn(),
+    waitUntilPromises,
+    flushWaitUntil: async () => {
+      await Promise.all(waitUntilPromises);
+    },
   };
 }
 
@@ -29,13 +41,50 @@ function createMockExecutionContext(): ExecutionContext {
 // Root Path Handler Tests
 // ============================================================================
 
+// Mock README content for testing
+const MOCK_README = `# Reprox — A Serverless Github Releases APT/RPM Gateway
+
+## Usage
+
+### APT (Debian/Ubuntu)
+
+\`\`\`bash
+curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | gpg --show-keys
+# Verify the instance's fingerprint by browsing to it in your web browser
+\`\`\`
+
+### RPM (Fedora/RHEL/CentOS)
+
+\`\`\`bash
+baseurl=https://reprox.dev/{owner}/{repo}
+# Verify the instance's fingerprint by browsing to it in your web browser
+\`\`\`
+`;
+
 describe('root path handler', () => {
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('raw.githubusercontent.com') && urlStr.includes('README.md')) {
+        return new Response(MOCK_README, { status: 200 });
+      }
+      return originalFetch(url);
+    }));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
   it('returns usage instructions at root path', async () => {
     const env = createMockEnv();
     const ctx = createMockExecutionContext();
     const request = new Request('https://example.com/');
 
     const response = await worker.fetch(request, env, ctx);
+    await ctx.flushWaitUntil();
 
     expect(response.status).toBe(200);
     const text = await response.text();
@@ -50,11 +99,42 @@ describe('root path handler', () => {
     const request = new Request('https://custom.domain.com/');
 
     const response = await worker.fetch(request, env, ctx);
+    await ctx.flushWaitUntil();
 
     expect(response.status).toBe(200);
     const text = await response.text();
     expect(text).toContain('https://custom.domain.com/{owner}/{repo}');
     expect(text).not.toContain('reprox.dev');
+  });
+
+  it('returns markdown content type', async () => {
+    const env = createMockEnv();
+    const ctx = createMockExecutionContext();
+    const request = new Request('https://example.com/');
+
+    const response = await worker.fetch(request, env, ctx);
+    await ctx.flushWaitUntil();
+
+    expect(response.headers.get('Content-Type')).toBe('text/markdown; charset=utf-8');
+  });
+
+  it('returns 502 when GitHub README fetch fails', async () => {
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('raw.githubusercontent.com')) {
+        return new Response('Not found', { status: 404 });
+      }
+      return originalFetch(url);
+    });
+
+    const env = createMockEnv();
+    const ctx = createMockExecutionContext();
+    const request = new Request('https://example.com/');
+
+    const response = await worker.fetch(request, env, ctx);
+    await ctx.flushWaitUntil();
+
+    expect(response.status).toBe(502);
   });
 });
 

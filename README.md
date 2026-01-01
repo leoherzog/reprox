@@ -1,27 +1,24 @@
-# Reprox 📦
+# 📦 Reprox — A Serverless Github Releases APT/RPM Gateway
+https://github.com/leoherzog/reprox
 
-## What is this?
+There are many great Linux softwares that distribute .deb and/or .rpm packages via Github Releases only. Reprox turns any GitHub repository that uses Releases into a fully compliant APT or COPR repository. Package downloads redirect straight to GitHub's CDN, moving the trust model from the maintainer of an APT/COPR repository to the maintainer of the GitHub repository.
 
-Want to distribute your software via `apt` or `dnf` without maintaining your own repository infrastructure? [Reprox](https://reprox.dev) turns any GitHub Release into a fully compliant APT or RPM repository on-the-fly. Just upload `.deb` or `.rpm` files to your GitHub Release and point your users at `reprox.dev/{owner}/{repo}`.
-
-### Features
-
-- 🚀 Instant repository from any GitHub Release - no setup required
-- 📦 Supports both APT (Debian/Ubuntu) and RPM (Fedora/RHEL/CentOS)
-- ⚡ Fast metadata generation via [Range Requests](https://developer.mozilla.org/en-US/docs/Web/HTTP/Range_requests)
-- 🔐 GPG-signed repositories for secure package verification
-- ↗️ Package downloads redirect straight to GitHub's CDN
+I made this for my own personal use, so I didn't have to "Watch" for new Github Releases and manually download/install updates. I recognize that I am man-in-the-middling the traditional trust model for package repositories. Be careful to add only trusted, official upstream Github repositories. If you're worried about me man-in-the-middleing you, skip ahead to [the Self-Hosting section](#self-hosting).
 
 ## Usage
 
 ### APT (Debian/Ubuntu)
 
 ```bash
+# Optional: verify the key fingerprint before importing
+curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | gpg --show-keys
+# Verify the instance's fingerprint by browsing to it in your web browser
+
 # Import the signing key
 curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | \
   sudo gpg --dearmor -o /etc/apt/keyrings/{repo}.gpg
 
-# Add the repository
+# Add the repository, replacing `{owner}`, `{repo}`, and `{package}` with your GitHub repository details and package name
 echo "deb [signed-by=/etc/apt/keyrings/{repo}.gpg] https://reprox.dev/{owner}/{repo} stable main" | \
   sudo tee /etc/apt/sources.list.d/{repo}.list
 
@@ -32,6 +29,7 @@ sudo apt update && sudo apt install {package}
 ### RPM (Fedora/RHEL/CentOS)
 
 ```bash
+# Add the repository, replacing `{owner}`, `{repo}`, and `{package}` with your GitHub repository details and package name
 sudo tee /etc/yum.repos.d/{repo}.repo << EOF
 [{repo}]
 name={repo} from GitHub via Reprox
@@ -43,15 +41,15 @@ gpgkey=https://reprox.dev/{owner}/{repo}/public.key
 EOF
 
 sudo dnf install {package}
+# Optional: verify the key fingerprint on first update/install
+# Verify the instance's fingerprint by browsing to it in your web browser
 ```
 
 Note: `gpgcheck=0` disables individual package signature verification because Reprox redirects downloads to GitHub without re-signing. Package integrity is still verified via checksums in the signed repository metadata (`repo_gpgcheck=1`).
 
-Replace `{owner}`, `{repo}`, and `{package}` with your GitHub repository details and package name.
-
 ## Self-Hosting
 
-Run your own instance on Cloudflare Workers:
+Feel free to use my instance at reprox.dev, or run your own instance on Cloudflare Workers:
 
 ### Prerequisites
 
@@ -63,7 +61,7 @@ Run your own instance on Cloudflare Workers:
 
 ```bash
 # Clone and install
-git clone https://github.com/leoherzog/reprox.git && cd reprox && npm install
+git clone git@github.com:leoherzog/reprox.git && cd reprox && npm install
 
 # Login to Cloudflare
 npx wrangler login
@@ -82,100 +80,12 @@ npx wrangler secret put GITHUB_TOKEN
 npm run deploy
 ```
 
-### Configuration
-
-**Secrets** (set via `npx wrangler secret put <NAME>`):
-
-| Secret | Description |
-|--------|-------------|
-| `GPG_PRIVATE_KEY` | ASCII-armored GPG private key for signing (recommended) |
-| `GPG_PASSPHRASE` | Passphrase if your GPG key is encrypted |
-| `GITHUB_TOKEN` | GitHub PAT for higher API rate limits |
-
-**Environment Variables** (set in `wrangler.toml`):
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CACHE_TTL` | `86400` | Cache TTL in seconds (24 hours) |
-
-### Custom Domain
-
-Add a custom domain via Cloudflare dashboard (Workers → Triggers → Custom Domains) or in `wrangler.toml`:
-
-```toml
-routes = [
-  { pattern = "packages.example.com/*", zone_name = "example.com" }
-]
-```
-
-### Updating
-
+To update, fetch and checkout the latest tagged Release:
 ```bash
-git pull && npm install && npm run deploy
+# git clone git@github.com:leoherzog/reprox.git
+git fetch --tags && git checkout $(git tag --sort=-version:refname | head -n1) && npm install && npm run deploy
 ```
-
-## License
-
-The MIT License (MIT)
-
-Copyright © 2025 Leo Herzog
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ## About Me
 
-<a href="https://herzog.tech/" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://herzog.tech/signature/link-light.svg.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://herzog.tech/signature/link.svg.png">
-    <img src="https://herzog.tech/signature/link.svg.png" width="32px">
-  </picture>
-</a>
-<a href="https://mastodon.social/@herzog" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://herzog.tech/signature/mastodon-light.svg.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://herzog.tech/signature/mastodon.svg.png">
-    <img src="https://herzog.tech/signature/mastodon.svg.png" width="32px">
-  </picture>
-</a>
-<a href="https://github.com/leoherzog" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://herzog.tech/signature/github-light.svg.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://herzog.tech/signature/github.svg.png">
-    <img src="https://herzog.tech/signature/github.svg.png" width="32px">
-  </picture>
-</a>
-<a href="https://keybase.io/leoherzog" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://herzog.tech/signature/keybase-light.svg.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://herzog.tech/signature/keybase.svg.png">
-    <img src="https://herzog.tech/signature/keybase.svg.png" width="32px">
-  </picture>
-</a>
-<a href="https://www.linkedin.com/in/leoherzog" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://herzog.tech/signature/linkedin-light.svg.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://herzog.tech/signature/linkedin.svg.png">
-    <img src="https://herzog.tech/signature/linkedin.svg.png" width="32px">
-  </picture>
-</a>
-<a href="https://hope.edu/directory/people/herzog-leo/" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://herzog.tech/signature/anchor-light.svg.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://herzog.tech/signature/anchor.svg.png">
-    <img src="https://herzog.tech/signature/anchor.svg.png" width="32px">
-  </picture>
-</a>
-<br />
-<a href="https://herzog.tech/$" target="_blank">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://herzog.tech/signature/mug-tea-saucer-solid-light.svg.png">
-    <source media="(prefers-color-scheme: light)" srcset="https://herzog.tech/signature/mug-tea-saucer-solid.svg.png">
-    <img src="https://herzog.tech/signature/mug-tea-saucer-solid.svg.png" alt="Buy Me A Tea" width="32px">
-  </picture>
-  Found this helpful? Buy me a tea!
-</a>
+♥ [Leo Herzog](https://herzog.tech). [🍵 Buy me a tea!](https://herzog.tech/$)

@@ -52,62 +52,10 @@ export default {
       const url = new URL(request.url);
       const route = parseRoute(url.pathname);
 
-      // Handle root path - show usage instructions
+      // Handle root path - serve README from GitHub with dynamic replacements
       if (url.pathname === '/' || url.pathname === '') {
-        const baseUrl = `${url.protocol}//${url.host}`;
-
-        // Get fingerprint if GPG key is configured
-        let fingerprint: string | null = null;
-        const gpgKey = env.GPG_PUBLIC_KEY || env.GPG_PRIVATE_KEY;
-        if (gpgKey) {
-          try {
-            fingerprint = await getKeyFingerprint(gpgKey);
-          } catch {
-            // Ignore errors - fingerprint is optional
-          }
-        }
-
-        const aptFingerprintNote = fingerprint
-          ? `  # Optional: verify the key fingerprint before importing\n` +
-            `  # curl -fsSL ${baseUrl}/{owner}/{repo}/public.key | gpg --show-keys\n` +
-            `  # This instance's fingerprint: ${fingerprint}\n\n`
-          : '';
-
-        const rpmFingerprintNote = fingerprint
-          ? `  # When importing the GPG key, verify this instance's fingerprint:\n` +
-            `  # ${fingerprint}\n\n`
-          : '';
-
-        return new Response(
-          'Reprox - Serverless Github Releases APT/RPM Gateway\n' +
-          'https://github.com/leoherzog/reprox\n\n' +
-          '=== APT (Debian/Ubuntu) ===\n\n' +
-          aptFingerprintNote +
-          '  # Import the signing key\n' +
-          `  curl -fsSL ${baseUrl}/{owner}/{repo}/public.key | \\\n` +
-          '    sudo gpg --dearmor -o /etc/apt/keyrings/{repo}.gpg\n\n' +
-          '  # Add the repository\n' +
-          `  echo "deb [signed-by=/etc/apt/keyrings/{repo}.gpg] ${baseUrl}/{owner}/{repo} stable main" | \\\n` +
-          '    sudo tee /etc/apt/sources.list.d/{repo}.list\n\n' +
-          '  # Install\n' +
-          '  sudo apt update && sudo apt install {package}\n\n' +
-          '=== RPM (Fedora/RHEL/CentOS) ===\n\n' +
-          '  sudo tee /etc/yum.repos.d/{repo}.repo << EOF\n' +
-          '  [{repo}]\n' +
-          '  name={repo} from GitHub via Reprox\n' +
-          `  baseurl=${baseUrl}/{owner}/{repo}\n` +
-          '  enabled=1\n' +
-          '  gpgcheck=0\n' +
-          '  repo_gpgcheck=1\n' +
-          `  gpgkey=${baseUrl}/{owner}/{repo}/public.key\n` +
-          '  EOF\n\n' +
-          rpmFingerprintNote +
-          '  sudo dnf install {package}\n',
-          {
-            status: 200,
-            headers: { 'Content-Type': 'text/plain' },
-          }
-        );
+        const cache = createCacheManager(env.CACHE_TTL);
+        return handleReadme(url, cache, env, ctx);
       }
 
       // Validate route has owner/repo
@@ -342,6 +290,78 @@ export function parseRoute(pathname: string): RouteInfo {
   }
 
   return route;
+}
+
+// GitHub raw URL for the README
+const README_RAW_URL = 'https://raw.githubusercontent.com/leoherzog/reprox/main/README.md';
+
+/**
+ * Handle root path request - fetch and serve README from GitHub
+ * with dynamic baseUrl and fingerprint replacements
+ */
+async function handleReadme(
+  url: URL,
+  cache: CacheManager,
+  env: Env,
+  ctx: ExecutionContext
+): Promise<Response> {
+  const baseUrl = `${url.protocol}//${url.host}`;
+
+  // Get fingerprint if GPG key is configured
+  let fingerprint: string | null = null;
+  const gpgKey = env.GPG_PUBLIC_KEY || env.GPG_PRIVATE_KEY;
+  if (gpgKey) {
+    try {
+      fingerprint = await getKeyFingerprint(gpgKey);
+    } catch {
+      // Ignore errors - fingerprint is optional
+    }
+  }
+
+  // Check cache for raw README
+  let rawReadme = await cache.getReadme();
+
+  if (!rawReadme) {
+    // Fetch from GitHub
+    try {
+      const response = await fetch(README_RAW_URL);
+      if (!response.ok) {
+        return new Response('Failed to fetch README from GitHub', { status: 502 });
+      }
+      rawReadme = await response.text();
+
+      // Cache the raw README in background
+      ctx.waitUntil(cache.setReadme(rawReadme));
+    } catch (error) {
+      console.error('Failed to fetch README:', error);
+      return new Response('Failed to fetch README from GitHub', { status: 502 });
+    }
+  }
+
+  // Apply dynamic replacements
+  let content = rawReadme;
+
+  // Replace all instances of https://reprox.dev with current baseUrl
+  content = content.replace(/https:\/\/reprox\.dev/g, baseUrl);
+
+  // Replace fingerprint placeholder with actual fingerprint
+  if (fingerprint) {
+    content = content.replace(
+      /# Verify the instance's fingerprint by browsing to it in your web browser/g,
+      `# This instance's fingerprint: ${fingerprint}`
+    );
+  } else {
+    // Remove the fingerprint comment lines if no key is configured
+    content = content.replace(/# Verify the instance's fingerprint by browsing to it in your web browser\n/g, '');
+  }
+
+  return new Response(content, {
+    status: 200,
+    headers: {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'Cache-Control': 'public, max-age=300',
+    },
+  });
 }
 
 /**

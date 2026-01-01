@@ -101,6 +101,10 @@ export class CacheManager {
     return `rpm/repomd-asc/${owner}/${repo}`;
   }
 
+  private readmeKey(): string {
+    return 'readme';
+  }
+
   // =============================================================================
   // Debian/APT Package Methods
   // =============================================================================
@@ -317,6 +321,26 @@ export class CacheManager {
    */
   async setRpmRepomdAsc(owner: string, repo: string, content: string): Promise<void> {
     const key = this.rpmRepomdAscKey(owner, repo);
+    await this.putInCache(key, content, this.defaultTtl);
+  }
+
+  // =============================================================================
+  // README Caching Methods
+  // =============================================================================
+
+  /**
+   * Get cached README content (raw, before dynamic replacements)
+   */
+  async getReadme(): Promise<string | null> {
+    const key = this.readmeKey();
+    return this.getFromCache(key);
+  }
+
+  /**
+   * Store README content (raw, before dynamic replacements)
+   */
+  async setReadme(content: string): Promise<void> {
+    const key = this.readmeKey();
     await this.putInCache(key, content, this.defaultTtl);
   }
 
