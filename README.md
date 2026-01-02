@@ -9,7 +9,33 @@ Supports all Releases since [June 2025](https://github.blog/changelog/2025-06-03
 
 ## Usage
 
-### APT (Debian/Ubuntu)
+### APT (Debian 13+/Ubuntu 24.04+ `.sources` Format)
+
+```bash
+# Replace {owner}, {repo}, and {package} with the Github repository and package name
+
+# Optional: verify the key fingerprint before importing
+curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | gpg --show-keys
+# Verify the instance's fingerprint by browsing to it in your web browser
+
+# Import the signing key
+curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | \
+  sudo gpg --dearmor -o /etc/apt/keyrings/{repo}.gpg
+
+# Add the repository
+sudo tee /etc/apt/sources.list.d/{repo}.sources << EOF
+Types: deb
+URIs: https://reprox.dev/{owner}/{repo}
+Suites: stable
+Components: main
+Signed-By: /etc/apt/keyrings/{repo}.gpg
+EOF
+
+# Install
+sudo apt update && sudo apt install {package}
+```
+
+### APT (Legacy `.list` Format)
 
 ```bash
 # Replace {owner}, {repo}, and {package} with the Github repository and package name
