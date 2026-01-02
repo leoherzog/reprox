@@ -386,7 +386,7 @@ async function handleReadme(
 <body class="markdown-body">
   <div id="content"></div>
   <script src="https://cdn.jsdelivr.net/npm/marked@latest/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked-gfm-heading-id@latest/dist/index.umd.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked-gfm-heading-id@latest/lib/index.umd.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked-alert@latest/dist/index.umd.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@latest/highlight.min.js"></script>
   <script>
