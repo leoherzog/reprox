@@ -361,7 +361,7 @@ async function handleReadme(
 
   if (wantsHtml) {
     const html = `<!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -384,7 +384,7 @@ async function handleReadme(
   </style>
 </head>
 <body class="markdown-body">
-  <div id="content"></div>
+  <main id="content"></main>
   <script src="https://cdn.jsdelivr.net/npm/marked@latest/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked-gfm-heading-id@latest/lib/index.umd.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked-alert@latest/dist/index.umd.js"></script>
