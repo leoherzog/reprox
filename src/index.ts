@@ -62,7 +62,7 @@ export default {
       }
 
       // Handle favicon request
-      if (url.pathname === '/favicon.ico') {
+      if (url.pathname === '/favicon.ico' || url.pathname === '/favicon.svg') {
         return handleFavicon();
       }
 
@@ -366,7 +366,7 @@ async function handleReadme(
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Reprox</title>
-  <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@latest/github-markdown.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@latest/styles/github.min.css" media="(prefers-color-scheme: light)">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@latest/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
