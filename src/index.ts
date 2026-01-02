@@ -365,7 +365,13 @@ async function handleReadme(
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Reprox</title>
+  <title>📦 Reprox — A Serverless Github Releases APT/RPM Gateway</title>
+  <meta name="description" content="Turn Github Releases into an APT or COPR repository">
+  <meta name="keywords" content="linux, software, reprox, github, releases, apt, copr, repository">
+  <meta property="og:url" content="https://reprox.dev">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="📦 Reprox — A Serverless Github Releases APT/RPM Gateway">
+  <meta property="og:description" content="Turn Github Releases into an APT or COPR repository">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@latest/github-markdown.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@latest/styles/github.min.css" media="(prefers-color-scheme: light)">
