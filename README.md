@@ -110,14 +110,16 @@ npx wrangler secret put GITHUB_TOKEN
 npm run deploy
 ```
 
-To update, `fetch` and `checkout` the latest tagged Release:
+To update manually:
 ```bash
 # git clone git@github.com:leoherzog/reprox.git
 git fetch --tags && git checkout $(git tag --sort=-version:refname | head -n1) && npm install && npm run deploy
 ```
 
-## About Me
+I have set up automatic deployments via [Cloudflare's Git Integration](https://developers.cloudflare.com/workers/ci-cd/builds/). Feel free to do similar. Upon a new GitHub Release, the `prod` branch updates automatically and Cloudflare deploys.
+
+## About
 
 ♥ [Leo Herzog](https://herzog.tech)
 
-[🍵 Buy me a tea!](https://herzog.tech/$)
+🍵 [Buy me a tea!](https://herzog.tech/$)

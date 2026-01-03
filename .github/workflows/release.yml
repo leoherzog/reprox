@@ -1,0 +1,16 @@
+name: Release to Production
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  push-to-prod:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push to prod branch
+        run: git push origin HEAD:refs/heads/prod --force

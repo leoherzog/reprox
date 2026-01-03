@@ -2,7 +2,7 @@
   "name": "reprox",
   "version": "1.0.0",
   "type": "module",
-  "description": "Serverless APT/RPM repository gateway using Cloudflare Workers",
+  "description": "Serverless APT/RPM Repository Gateway using Cloudflare Workers",
   "main": "src/index.ts",
   "scripts": {
     "postinstall": "node scripts/extract-xz-wasm.cjs",
