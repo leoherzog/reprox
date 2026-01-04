@@ -23,6 +23,7 @@ import {
 import type { RepomdFileInfo } from './generators/repodata';
 import { signCleartext, signDetached, signDetachedBinary, extractPublicKey, getKeyFingerprint } from './signing/gpg';
 import { gzipCompress, sha256 } from './utils/crypto';
+import { README_HTML, README_MARKDOWN } from './generated/readme-html';
 
 /**
  * Reprox - Serverless APT/RPM Repository Gateway
@@ -52,13 +53,9 @@ export default {
       const url = new URL(request.url);
       const route = parseRoute(url.pathname);
 
-      // Handle root path - serve README from GitHub with dynamic replacements
+      // Handle root path - serve static README with dynamic replacements
       if (url.pathname === '/') {
-        const cache = createCacheManager(env.CACHE_TTL);
-        if (url.searchParams.get('cache') === 'false') {
-          await cache.clearReadme();
-        }
-        return handleReadme(request, url, cache, env, ctx);
+        return handleReadme(request, url, env);
       }
 
       // Handle favicon request
@@ -291,120 +288,34 @@ function aggregateAssets(releases: GitHubRelease[]): AggregatedAsset[] {
   );
 }
 
-// GitHub raw URL for the README
-const README_RAW_URL = 'https://raw.githubusercontent.com/leoherzog/reprox/main/README.md';
-
 /**
- * Handle root path request - fetch and serve README from GitHub
+ * Handle root path request - serve pre-built static README
  * with dynamic baseUrl and fingerprint replacements
  */
-async function handleReadme(
-  request: Request,
-  url: URL,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<Response> {
+async function handleReadme(request: Request, url: URL, env: Env): Promise<Response> {
   const baseUrl = `${url.protocol}//${url.host}`;
 
-  // Get fingerprint if GPG key is configured
-  let fingerprint: string | null = null;
+  // Get fingerprint comment if GPG key is configured
+  let fingerprintComment = '';
   const gpgKey = env.GPG_PUBLIC_KEY || env.GPG_PRIVATE_KEY;
   if (gpgKey) {
     try {
-      fingerprint = await getKeyFingerprint(gpgKey);
+      const fingerprint = await getKeyFingerprint(gpgKey);
+      fingerprintComment = `# This instance's fingerprint: ${fingerprint}`;
     } catch {
       // Ignore errors - fingerprint is optional
     }
   }
 
-  // Check cache for raw README
-  let rawReadme = await cache.getReadme();
-
-  if (!rawReadme) {
-    // Fetch from GitHub
-    try {
-      const response = await fetch(README_RAW_URL);
-      if (!response.ok) {
-        return new Response('Failed to fetch README from GitHub', { status: 502 });
-      }
-      rawReadme = await response.text();
-
-      // Cache the raw README in background
-      ctx.waitUntil(cache.setReadme(rawReadme));
-    } catch (error) {
-      console.error('Failed to fetch README:', error);
-      return new Response('Failed to fetch README from GitHub', { status: 502 });
-    }
-  }
-
-  // Apply dynamic replacements
-  let content = rawReadme;
-
-  // Replace all instances of https://reprox.dev with current baseUrl
-  content = content.replace(/https:\/\/reprox\.dev/g, baseUrl);
-
-  // Replace fingerprint placeholder with actual fingerprint
-  if (fingerprint) {
-    content = content.replace(
-      /# Verify the instance's fingerprint by browsing to it in your web browser/g,
-      `# This instance's fingerprint: ${fingerprint}`
-    );
-  } else {
-    // Remove the fingerprint comment lines if no key is configured
-    content = content.replace(/# Verify the instance's fingerprint by browsing to it in your web browser\n/g, '');
-  }
-
-  // Check if browser wants HTML
+  // Content negotiation: HTML for browsers, markdown for CLI/APIs
   const acceptHeader = request.headers.get('Accept') || '';
-  const wantsHtml = acceptHeader.includes('text/html');
+  if (acceptHeader.includes('text/html')) {
+    // Serve pre-built static HTML
+    const html = README_HTML
+      .replace(/\{\{BASE_URL\}\}/g, baseUrl)
+      .replace(/\{\{FINGERPRINT_COMMENT\}\}/g, fingerprintComment);
 
-  if (wantsHtml) {
-    const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>📦 Reprox — A Serverless Github Releases APT/RPM Gateway</title>
-  <meta name="description" content="Turn Github Releases into an APT or COPR repository">
-  <meta name="keywords" content="linux, software, reprox, github, releases, apt, copr, repository">
-  <meta property="og:url" content="https://reprox.dev">
-  <meta property="og:type" content="website">
-  <meta property="og:title" content="📦 Reprox — A Serverless Github Releases APT/RPM Gateway">
-  <meta property="og:description" content="Turn Github Releases into an APT or COPR repository">
-  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@latest/github-markdown.min.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@latest/styles/github.min.css" media="(prefers-color-scheme: light)">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@latest/styles/github-dark.min.css" media="(prefers-color-scheme: dark)">
-  <style>
-    .markdown-body {
-      box-sizing: border-box;
-      min-width: 200px;
-      max-width: 980px;
-      margin: 0 auto;
-      padding: 45px;
-    }
-    @media (max-width: 767px) {
-      .markdown-body { padding: 15px; }
-    }
-  </style>
-</head>
-<body class="markdown-body">
-  <main id="content"></main>
-  <script src="https://cdn.jsdelivr.net/npm/marked@latest/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked-gfm-heading-id@latest/lib/index.umd.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked-alert@latest/dist/index.umd.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@latest/highlight.min.js"></script>
-  <script>
-    marked.use(markedGfmHeadingId.gfmHeadingId());
-    marked.use(markedAlert());
-    document.getElementById('content').innerHTML = marked.parse(${JSON.stringify(content)});
-    hljs.highlightAll();
-  </script>
-</body>
-</html>`;
     return new Response(html, {
-      status: 200,
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'public, max-age=300',
@@ -412,8 +323,12 @@ async function handleReadme(
     });
   }
 
-  return new Response(content, {
-    status: 200,
+  // Non-browser: serve pre-built static markdown
+  const markdown = README_MARKDOWN
+    .replace(/\{\{BASE_URL\}\}/g, baseUrl)
+    .replace(/\{\{FINGERPRINT_COMMENT\}\}/g, fingerprintComment);
+
+  return new Response(markdown, {
     headers: {
       'Content-Type': 'text/markdown; charset=utf-8',
       'Cache-Control': 'public, max-age=300',

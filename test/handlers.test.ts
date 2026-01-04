@@ -41,50 +41,13 @@ function createMockExecutionContext(): MockExecutionContext {
 // Root Path Handler Tests
 // ============================================================================
 
-// Mock README content for testing
-const MOCK_README = `# Reprox — A Serverless Github Releases APT/RPM Gateway
-
-## Usage
-
-### APT (Debian/Ubuntu)
-
-\`\`\`bash
-curl -fsSL https://reprox.dev/{owner}/{repo}/public.key | gpg --show-keys
-# Verify the instance's fingerprint by browsing to it in your web browser
-\`\`\`
-
-### RPM (Fedora/RHEL/CentOS)
-
-\`\`\`bash
-baseurl=https://reprox.dev/{owner}/{repo}
-# Verify the instance's fingerprint by browsing to it in your web browser
-\`\`\`
-`;
-
 describe('root path handler', () => {
-  const originalFetch = globalThis.fetch;
-
-  beforeEach(() => {
-    vi.stubGlobal('fetch', vi.fn().mockImplementation(async (url) => {
-      const urlStr = url.toString();
-      if (urlStr.includes('raw.githubusercontent.com') && urlStr.includes('README.md')) {
-        return new Response(MOCK_README, { status: 200 });
-      }
-      return originalFetch(url);
-    }));
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  it('returns usage instructions at root path', async () => {
+  it('returns usage instructions at root path (markdown for non-browser)', async () => {
     const env = createMockEnv();
     const ctx = createMockExecutionContext();
     const request = new Request('https://example.com/');
 
     const response = await worker.fetch(request, env, ctx);
-    await ctx.flushWaitUntil();
 
     expect(response.status).toBe(200);
     const text = await response.text();
@@ -93,48 +56,62 @@ describe('root path handler', () => {
     expect(text).toContain('RPM');
   });
 
-  it('uses dynamic URL based on incoming request', async () => {
+  it('returns HTML for browser requests', async () => {
+    const env = createMockEnv();
+    const ctx = createMockExecutionContext();
+    const request = new Request('https://example.com/', {
+      headers: { 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9' },
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+    const text = await response.text();
+    expect(text).toContain('<!DOCTYPE html>');
+    expect(text).toContain('Reprox');
+  });
+
+  it('uses dynamic URL based on incoming request (markdown)', async () => {
     const env = createMockEnv();
     const ctx = createMockExecutionContext();
     const request = new Request('https://custom.domain.com/');
 
     const response = await worker.fetch(request, env, ctx);
-    await ctx.flushWaitUntil();
 
     expect(response.status).toBe(200);
     const text = await response.text();
+    // URLs should be replaced with the custom domain
     expect(text).toContain('https://custom.domain.com/{owner}/{repo}');
-    expect(text).not.toContain('reprox.dev');
+    // Should not contain reprox.dev URLs (prose mentions of reprox.dev are fine)
+    expect(text).not.toContain('https://reprox.dev');
   });
 
-  it('returns markdown content type', async () => {
+  it('uses dynamic URL based on incoming request (HTML)', async () => {
     const env = createMockEnv();
     const ctx = createMockExecutionContext();
-    const request = new Request('https://example.com/');
-
-    const response = await worker.fetch(request, env, ctx);
-    await ctx.flushWaitUntil();
-
-    expect(response.headers.get('Content-Type')).toBe('text/markdown; charset=utf-8');
-  });
-
-  it('returns 502 when GitHub README fetch fails', async () => {
-    vi.mocked(fetch).mockImplementation(async (url) => {
-      const urlStr = url.toString();
-      if (urlStr.includes('raw.githubusercontent.com')) {
-        return new Response('Not found', { status: 404 });
-      }
-      return originalFetch(url);
+    const request = new Request('https://custom.domain.com/', {
+      headers: { 'Accept': 'text/html' },
     });
 
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    // URLs should be replaced with the custom domain
+    expect(text).toContain('https://custom.domain.com/{owner}/{repo}');
+    // Should not contain reprox.dev URLs (prose mentions of reprox.dev are fine)
+    expect(text).not.toContain('https://reprox.dev');
+  });
+
+  it('returns markdown content type for non-browser requests', async () => {
     const env = createMockEnv();
     const ctx = createMockExecutionContext();
     const request = new Request('https://example.com/');
 
     const response = await worker.fetch(request, env, ctx);
-    await ctx.flushWaitUntil();
 
-    expect(response.status).toBe(502);
+    expect(response.headers.get('Content-Type')).toBe('text/markdown; charset=utf-8');
   });
 });
 

@@ -6,10 +6,13 @@
   "main": "src/index.ts",
   "scripts": {
     "postinstall": "node scripts/extract-xz-wasm.cjs",
-    "dev": "wrangler dev",
+    "build:readme": "npx tsx scripts/build-readme.ts",
+    "dev": "npm run build:readme && wrangler dev",
+    "predeploy": "npm run build:readme",
     "deploy": "wrangler deploy",
+    "pretest": "npm run build:readme",
     "test": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "npm run build:readme && tsc --noEmit"
   },
   "dependencies": {
     "fzstd": "^0.1.1",
@@ -19,6 +22,12 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.11.1",
     "@cloudflare/workers-types": "^4.20251228.0",
+    "github-markdown-css": "^5.8.1",
+    "highlight.js": "^11.11.1",
+    "marked": "^17.0.1",
+    "marked-alert": "^2.1.2",
+    "marked-gfm-heading-id": "^4.1.3",
+    "tsx": "^4.21.0",
     "typescript": "^5.7.2",
     "vitest": "^3.2.4",
     "wrangler": "^4.54.0"

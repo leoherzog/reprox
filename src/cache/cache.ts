@@ -112,10 +112,6 @@ export class CacheManager {
     return `rpm/repomd-asc/${variant}/${owner}/${repo}`;
   }
 
-  private readmeKey(): string {
-    return 'readme';
-  }
-
   private assetUrlKey(owner: string, repo: string, filename: string, variant: ReleaseVariant, releaseHash: string): string {
     // Include release hash so URLs auto-invalidate when releases change
     return `asset-url/${variant}/${owner}/${repo}/${releaseHash}/${filename}`;
@@ -339,34 +335,6 @@ export class CacheManager {
   async setRpmRepomdAsc(owner: string, repo: string, variant: ReleaseVariant, content: string): Promise<void> {
     const key = this.rpmRepomdAscKey(owner, repo, variant);
     await this.putInCache(key, content, this.defaultTtl);
-  }
-
-  // =============================================================================
-  // README Caching Methods
-  // =============================================================================
-
-  /**
-   * Get cached README content (raw, before dynamic replacements)
-   */
-  async getReadme(): Promise<string | null> {
-    const key = this.readmeKey();
-    return this.getFromCache(key);
-  }
-
-  /**
-   * Store README content (raw, before dynamic replacements)
-   */
-  async setReadme(content: string): Promise<void> {
-    const key = this.readmeKey();
-    await this.putInCache(key, content, this.defaultTtl);
-  }
-
-  /**
-   * Clear cached README content
-   */
-  async clearReadme(): Promise<void> {
-    const key = this.readmeKey();
-    await this.cache.delete(this.createCacheRequest(key));
   }
 
   // =============================================================================
