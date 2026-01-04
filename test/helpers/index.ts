@@ -26,12 +26,28 @@ export function createMockEnv(overrides: Partial<Env> = {}): Env {
 }
 
 /**
- * Create a mock ExecutionContext for Cloudflare Workers
+ * Enhanced mock ExecutionContext with promise tracking
  */
-export function createMockExecutionContext(): ExecutionContext {
+export interface MockExecutionContext extends ExecutionContext {
+  waitUntilPromises: Promise<unknown>[];
+  flushWaitUntil: () => Promise<void>;
+}
+
+/**
+ * Create a mock ExecutionContext for Cloudflare Workers
+ * with ability to track and flush waitUntil promises
+ */
+export function createMockExecutionContext(): MockExecutionContext {
+  const waitUntilPromises: Promise<unknown>[] = [];
   return {
-    waitUntil: vi.fn(),
+    waitUntil: vi.fn((promise: Promise<unknown>) => {
+      waitUntilPromises.push(promise);
+    }),
     passThroughOnException: vi.fn(),
+    waitUntilPromises,
+    flushWaitUntil: async () => {
+      await Promise.all(waitUntilPromises);
+    },
   };
 }
 
@@ -234,4 +250,249 @@ export function mockFetchError(status: number, statusText: string): void {
     status,
     statusText,
   } as Response);
+}
+
+// ============================================================================
+// Test Data Builders - GitHub API
+// ============================================================================
+
+import type { GitHubRelease } from '../../src/types';
+
+/**
+ * Create a mock GitHub release object
+ */
+export function createMockGitHubRelease(overrides: Partial<GitHubRelease> = {}): GitHubRelease {
+  return {
+    id: 12345,
+    tag_name: 'v1.0.0',
+    name: 'Release 1.0.0',
+    body: 'Release notes',
+    published_at: '2024-01-15T12:00:00Z',
+    prerelease: false,
+    assets: [],
+    ...overrides,
+  };
+}
+
+/**
+ * Create a mock GitHub asset
+ */
+export function createMockGitHubAsset(overrides: Partial<GitHubRelease['assets'][0]> = {}): GitHubRelease['assets'][0] {
+  return {
+    name: 'test-package_1.0.0_amd64.deb',
+    size: 50000,
+    browser_download_url: 'https://github.com/owner/repo/releases/download/v1.0.0/test-package_1.0.0_amd64.deb',
+    ...overrides,
+  };
+}
+
+// ============================================================================
+// Mock CacheManager for Handler Testing
+// ============================================================================
+
+import type { ReleaseVariant } from '../../src/cache/cache';
+
+/**
+ * Mock CacheManager that stores data in memory for testing
+ */
+export class MockCacheManager {
+  private store = new Map<string, string>();
+
+  // Configure what the cache returns
+  private releaseIdsHash: string | null = null;
+  private inReleaseFile: string | null = null;
+  private releaseFile: string | null = null;
+  private releaseGpgSignature: string | null = null;
+  private packagesFiles = new Map<string, string>();
+  private rpmMetadata = new Map<string, string>();
+  private rpmTimestamp: number | null = null;
+  private assetUrls = new Map<string, string>();
+
+  // Track method calls for assertions
+  public calls = {
+    getReleaseIdsHash: 0,
+    setReleaseIdsHash: 0,
+    getInReleaseFile: 0,
+    setInReleaseFile: 0,
+    getReleaseFile: 0,
+    setReleaseFile: 0,
+    getReleaseGpgSignature: 0,
+    setReleaseGpgSignature: 0,
+    getPackagesFile: 0,
+    setPackagesFile: 0,
+    needsRefresh: 0,
+  };
+
+  // Configuration methods
+  setCachedReleaseIdsHash(hash: string | null): void {
+    this.releaseIdsHash = hash;
+  }
+
+  setCachedInReleaseFile(content: string | null): void {
+    this.inReleaseFile = content;
+  }
+
+  setCachedReleaseFile(content: string | null): void {
+    this.releaseFile = content;
+  }
+
+  setCachedReleaseGpgSignature(signature: string | null): void {
+    this.releaseGpgSignature = signature;
+  }
+
+  setCachedPackagesFile(arch: string, content: string): void {
+    this.packagesFiles.set(arch, content);
+  }
+
+  setCachedRpmMetadata(type: string, content: string): void {
+    this.rpmMetadata.set(type, content);
+  }
+
+  setCachedRpmTimestamp(timestamp: number): void {
+    this.rpmTimestamp = timestamp;
+  }
+
+  // CacheManager interface implementation
+  async getReleaseIdsHash(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    this.calls.getReleaseIdsHash++;
+    return this.releaseIdsHash;
+  }
+
+  async setReleaseIdsHash(_owner: string, _repo: string, _variant: ReleaseVariant, hash: string): Promise<void> {
+    this.calls.setReleaseIdsHash++;
+    this.releaseIdsHash = hash;
+  }
+
+  async getInReleaseFile(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    this.calls.getInReleaseFile++;
+    return this.inReleaseFile;
+  }
+
+  async setInReleaseFile(_owner: string, _repo: string, _variant: ReleaseVariant, content: string): Promise<void> {
+    this.calls.setInReleaseFile++;
+    this.inReleaseFile = content;
+  }
+
+  async getReleaseFile(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    this.calls.getReleaseFile++;
+    return this.releaseFile;
+  }
+
+  async setReleaseFile(_owner: string, _repo: string, _variant: ReleaseVariant, content: string): Promise<void> {
+    this.calls.setReleaseFile++;
+    this.releaseFile = content;
+  }
+
+  async getReleaseGpgSignature(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    this.calls.getReleaseGpgSignature++;
+    return this.releaseGpgSignature;
+  }
+
+  async setReleaseGpgSignature(_owner: string, _repo: string, _variant: ReleaseVariant, signature: string): Promise<void> {
+    this.calls.setReleaseGpgSignature++;
+    this.releaseGpgSignature = signature;
+  }
+
+  async getPackagesFile(_owner: string, _repo: string, arch: string, _variant: ReleaseVariant): Promise<string | null> {
+    this.calls.getPackagesFile++;
+    return this.packagesFiles.get(arch) || null;
+  }
+
+  async setPackagesFile(_owner: string, _repo: string, arch: string, _variant: ReleaseVariant, content: string): Promise<void> {
+    this.calls.setPackagesFile++;
+    this.packagesFiles.set(arch, content);
+  }
+
+  async needsRefresh(_owner: string, _repo: string, _variant: ReleaseVariant, currentHash: string): Promise<boolean> {
+    this.calls.needsRefresh++;
+    return this.releaseIdsHash !== currentHash;
+  }
+
+  // RPM methods
+  async getRpmPrimaryXml(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    return this.rpmMetadata.get('primary') || null;
+  }
+
+  async setRpmPrimaryXml(_owner: string, _repo: string, _variant: ReleaseVariant, content: string): Promise<void> {
+    this.rpmMetadata.set('primary', content);
+  }
+
+  async getRpmFilelistsXml(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    return this.rpmMetadata.get('filelists') || null;
+  }
+
+  async setRpmFilelistsXml(_owner: string, _repo: string, _variant: ReleaseVariant, content: string): Promise<void> {
+    this.rpmMetadata.set('filelists', content);
+  }
+
+  async getRpmOtherXml(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    return this.rpmMetadata.get('other') || null;
+  }
+
+  async setRpmOtherXml(_owner: string, _repo: string, _variant: ReleaseVariant, content: string): Promise<void> {
+    this.rpmMetadata.set('other', content);
+  }
+
+  async getRpmTimestamp(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<number | null> {
+    return this.rpmTimestamp;
+  }
+
+  async setRpmTimestamp(_owner: string, _repo: string, _variant: ReleaseVariant, timestamp: number): Promise<void> {
+    this.rpmTimestamp = timestamp;
+  }
+
+  async getRpmRepomd(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    return this.rpmMetadata.get('repomd') || null;
+  }
+
+  async setRpmRepomd(_owner: string, _repo: string, _variant: ReleaseVariant, content: string): Promise<void> {
+    this.rpmMetadata.set('repomd', content);
+  }
+
+  async getRpmRepomdAsc(_owner: string, _repo: string, _variant: ReleaseVariant): Promise<string | null> {
+    return this.rpmMetadata.get('repomd-asc') || null;
+  }
+
+  async setRpmRepomdAsc(_owner: string, _repo: string, _variant: ReleaseVariant, content: string): Promise<void> {
+    this.rpmMetadata.set('repomd-asc', content);
+  }
+
+  async getAssetUrl(_owner: string, _repo: string, filename: string, _variant: ReleaseVariant, _releaseHash: string): Promise<string | null> {
+    return this.assetUrls.get(filename) || null;
+  }
+
+  async setAssetUrl(_owner: string, _repo: string, filename: string, _variant: ReleaseVariant, _releaseHash: string, url: string): Promise<void> {
+    this.assetUrls.set(filename, url);
+  }
+
+  async setAssetUrls(_owner: string, _repo: string, _variant: ReleaseVariant, _releaseHash: string, assets: Array<{ name: string; browser_download_url: string }>): Promise<void> {
+    for (const asset of assets) {
+      this.assetUrls.set(asset.name, asset.browser_download_url);
+    }
+  }
+
+  async clearAllCache(_owner: string, _repo: string): Promise<void> {
+    this.releaseIdsHash = null;
+    this.inReleaseFile = null;
+    this.releaseFile = null;
+    this.releaseGpgSignature = null;
+    this.packagesFiles.clear();
+    this.rpmMetadata.clear();
+    this.rpmTimestamp = null;
+    this.assetUrls.clear();
+  }
+
+  // Reset call counts
+  resetCalls(): void {
+    for (const key of Object.keys(this.calls) as Array<keyof typeof this.calls>) {
+      this.calls[key] = 0;
+    }
+  }
+}
+
+/**
+ * Create a mock CacheManager instance
+ */
+export function createMockCacheManager(): MockCacheManager {
+  return new MockCacheManager();
 }
