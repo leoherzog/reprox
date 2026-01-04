@@ -295,13 +295,15 @@ function aggregateAssets(releases: GitHubRelease[]): AggregatedAsset[] {
 async function handleReadme(request: Request, url: URL, env: Env): Promise<Response> {
   const baseUrl = `${url.protocol}//${url.host}`;
 
-  // Get fingerprint comment if GPG key is configured
+  // Get fingerprint if GPG key is configured
   let fingerprintComment = '';
+  let fingerprintFooter = '';
   const gpgKey = env.GPG_PUBLIC_KEY || env.GPG_PRIVATE_KEY;
   if (gpgKey) {
     try {
       const fingerprint = await getKeyFingerprint(gpgKey);
       fingerprintComment = `# This instance's fingerprint: ${fingerprint}`;
+      fingerprintFooter = ` · Fingerprint: ${fingerprint}`;
     } catch {
       // Ignore errors - fingerprint is optional
     }
@@ -313,7 +315,8 @@ async function handleReadme(request: Request, url: URL, env: Env): Promise<Respo
     // Serve pre-built static HTML
     const html = README_HTML
       .replace(/\{\{BASE_URL\}\}/g, baseUrl)
-      .replace(/\{\{FINGERPRINT_COMMENT\}\}/g, fingerprintComment);
+      .replace(/\{\{FINGERPRINT_COMMENT\}\}/g, fingerprintComment)
+      .replace(/\{\{FINGERPRINT_FOOTER\}\}/g, fingerprintFooter);
 
     return new Response(html, {
       headers: {
