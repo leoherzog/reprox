@@ -9,7 +9,9 @@ Supports all Releases since [June 2025](https://github.blog/changelog/2025-06-03
 
 ## Usage
 
-### APT (Debian 13+/Ubuntu 24.04+ `.sources` Format)
+### APT (Modern)
+
+Debian 13+/Ubuntu 24.04+ `.sources` Format
 
 ```bash
 # Replace {owner}, {repo}, and {package} with the Github repository and package name
@@ -35,7 +37,9 @@ EOF
 sudo apt update && sudo apt install {package}
 ```
 
-### APT (Legacy `.list` Format)
+### APT (Legacy)
+
+`.list` Format
 
 ```bash
 # Replace {owner}, {repo}, and {package} with the Github repository and package name
