@@ -26,13 +26,33 @@ import cssnano from 'cssnano';
 // Register only bash for minimal bundle size
 hljs.registerLanguage('bash', bash);
 
-// GitHub repository for version links
-const GITHUB_REPO = 'leoherzog/reprox';
+/**
+ * Parse GitHub repo (owner/repo) from git remote URL
+ * Supports: ssh://git@github.com/owner/repo, git@github.com:owner/repo.git, https://github.com/owner/repo.git
+ */
+function getGitHubRepo(): string {
+  try {
+    const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8' }).trim();
+
+    // Match owner/repo from various GitHub URL formats
+    const match = remoteUrl.match(/github\.com[/:]([\w.-]+\/[\w.-]+?)(?:\.git)?$/);
+    if (match) {
+      return match[1];
+    }
+  } catch {
+    // Ignore errors
+  }
+
+  // Fallback if parsing fails
+  return 'leoherzog/reprox';
+}
 
 /**
  * Get git version info - prefer release tag, fallback to commit hash
  */
 function getGitInfo(): { version: string; url: string; label: string } {
+  const repo = getGitHubRepo();
+
   // Try to get tag if HEAD is exactly tagged
   try {
     const tag = execSync('git describe --tags --exact-match HEAD', {
@@ -41,7 +61,7 @@ function getGitInfo(): { version: string; url: string; label: string } {
     }).trim();
     return {
       version: tag,
-      url: `https://github.com/${GITHUB_REPO}/releases/tag/${tag}`,
+      url: `https://github.com/${repo}/releases/tag/${tag}`,
       label: 'Release',
     };
   } catch {
@@ -49,7 +69,7 @@ function getGitInfo(): { version: string; url: string; label: string } {
     const commit = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim();
     return {
       version: commit,
-      url: `https://github.com/${GITHUB_REPO}/commit/${commit}`,
+      url: `https://github.com/${repo}/commit/${commit}`,
       label: 'Commit',
     };
   }
