@@ -10,6 +10,20 @@ import * as openpgp from 'openpgp';
  */
 
 /**
+ * Read (and optionally decrypt) an armored private key.
+ */
+async function loadPrivateKey(
+  privateKeyArmored: string,
+  passphrase?: string
+): Promise<openpgp.PrivateKey> {
+  const privateKey = await openpgp.readPrivateKey({ armoredKey: privateKeyArmored });
+  if (passphrase) {
+    return openpgp.decryptKey({ privateKey, passphrase });
+  }
+  return privateKey;
+}
+
+/**
  * Sign content as cleartext (for InRelease file)
  * This creates an inline signature that can be verified without stripping
  */
@@ -18,31 +32,14 @@ export async function signCleartext(
   privateKeyArmored: string,
   passphrase?: string
 ): Promise<string> {
-  // Read the private key
-  let privateKey = await openpgp.readPrivateKey({
-    armoredKey: privateKeyArmored,
-  });
+  const privateKey = await loadPrivateKey(privateKeyArmored, passphrase);
 
-  // Decrypt if passphrase provided
-  if (passphrase) {
-    privateKey = await openpgp.decryptKey({
-      privateKey,
-      passphrase,
-    });
-  }
+  const message = await openpgp.createCleartextMessage({ text: content });
 
-  // Create cleartext message
-  const message = await openpgp.createCleartextMessage({
-    text: content,
-  });
-
-  // Sign the message
-  const signed = await openpgp.sign({
+  return openpgp.sign({
     message,
     signingKeys: privateKey,
   });
-
-  return signed;
 }
 
 /**
@@ -54,25 +51,10 @@ export async function signDetached(
   privateKeyArmored: string,
   passphrase?: string
 ): Promise<string> {
-  // Read the private key
-  let privateKey = await openpgp.readPrivateKey({
-    armoredKey: privateKeyArmored,
-  });
+  const privateKey = await loadPrivateKey(privateKeyArmored, passphrase);
 
-  // Decrypt if passphrase provided
-  if (passphrase) {
-    privateKey = await openpgp.decryptKey({
-      privateKey,
-      passphrase,
-    });
-  }
+  const message = await openpgp.createMessage({ text: content });
 
-  // Create message from text
-  const message = await openpgp.createMessage({
-    text: content,
-  });
-
-  // Create detached signature
   const signature = await openpgp.sign({
     message,
     signingKeys: privateKey,
@@ -92,25 +74,13 @@ export async function signDetachedBinary(
   privateKeyArmored: string,
   passphrase?: string
 ): Promise<string> {
-  // Read the private key
-  let privateKey = await openpgp.readPrivateKey({
-    armoredKey: privateKeyArmored,
-  });
-
-  // Decrypt if passphrase provided
-  if (passphrase) {
-    privateKey = await openpgp.decryptKey({
-      privateKey,
-      passphrase,
-    });
-  }
+  const privateKey = await loadPrivateKey(privateKeyArmored, passphrase);
 
   // Create message as binary data (produces sigclass 0x00)
   const message = await openpgp.createMessage({
     binary: new TextEncoder().encode(content),
   });
 
-  // Create detached signature
   const signature = await openpgp.sign({
     message,
     signingKeys: privateKey,

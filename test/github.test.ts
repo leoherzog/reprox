@@ -414,6 +414,46 @@ describe('GitHubClient', () => {
         .rejects.toThrow('GitHub API error: 500 Internal Server Error');
     });
 
+    it('excludes releases with null published_at (drafts)', async () => {
+      const mockReleases = [
+        createMockRelease(1, false),
+        { ...createMockRelease(2, false), published_at: null }, // draft
+        createMockRelease(3, false),
+        { ...createMockRelease(4, false), published_at: null }, // draft
+      ];
+
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockReleases),
+      } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo');
+
+      expect(releases).toHaveLength(2);
+      expect(releases.map(r => r.id)).toEqual([1, 3]);
+      expect(releases.every(r => r.published_at !== null)).toBe(true);
+    });
+
+    it('excludes null-published_at prereleases even when prereleases included', async () => {
+      const mockReleases = [
+        createMockRelease(1, true),
+        { ...createMockRelease(2, true), published_at: null },
+        createMockRelease(3, false),
+      ];
+
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockReleases),
+      } as Response);
+
+      const client = new GitHubClient();
+      const releases = await client.getAllReleases('owner', 'repo', true);
+
+      expect(releases).toHaveLength(2);
+      expect(releases.map(r => r.id).sort()).toEqual([1, 3]);
+    });
+
     it('respects max page limit to prevent infinite loops', async () => {
       // Always return exactly 100 items to simulate infinite pagination
       const fullPage = Array.from({ length: 100 }, (_, i) => createMockRelease(i + 1));

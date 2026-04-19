@@ -12,7 +12,7 @@ export async function readStreamToBuffer(stream: ReadableStream<Uint8Array>): Pr
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
-    chunks.push(value);
+    chunks.push(new Uint8Array(value));
   }
 
   return concatUint8Arrays(chunks);

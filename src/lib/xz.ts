@@ -19,16 +19,20 @@ async function ensureInitialized(): Promise<void> {
   // Return existing promise if already initializing (prevents race condition)
   if (initPromise) return initPromise;
 
-  // Create and store initialization promise
+  // Create and store initialization promise. If instantiate fails, clear the
+  // cached promise so a subsequent call retries rather than re-throwing the
+  // same rejection forever.
   initPromise = (async () => {
-    // Instantiate the statically-imported WASM module
-    const instance = await WebAssembly.instantiate(xzWasmModule, {});
-
-    // Patch the XzReadableStream class with our pre-instantiated module
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (XzReadableStream as any)._moduleInstance = instance;
-
-    initialized = true;
+    try {
+      const instance = await WebAssembly.instantiate(xzWasmModule, {});
+      // Patch the XzReadableStream class with our pre-instantiated module
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (XzReadableStream as any)._moduleInstance = instance;
+      initialized = true;
+    } catch (error) {
+      initPromise = null;
+      throw error;
+    }
   })();
 
   return initPromise;
