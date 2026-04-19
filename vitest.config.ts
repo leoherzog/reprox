@@ -1,23 +1,24 @@
-import { defineWorkersConfig } from '@cloudflare/vitest-pool-workers/config';
+import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
+import { defineConfig } from 'vitest/config';
 
-export default defineWorkersConfig({
+export default defineConfig({
+  plugins: [
+    cloudflareTest({
+      wrangler: { configPath: './wrangler.toml' },
+      miniflare: {
+        bindings: {
+          // Pass environment variables to Workers runtime for integration tests
+          // Use empty strings as defaults since undefined is rejected
+          GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? '',
+          RUN_INTEGRATION_TESTS: process.env.RUN_INTEGRATION_TESTS ?? '',
+        },
+      },
+    }),
+  ],
   test: {
     globals: true,
     include: ['test/**/*.test.ts'],
     testTimeout: 30000, // 30s for integration tests with network requests
-    poolOptions: {
-      workers: {
-        wrangler: { configPath: './wrangler.toml' },
-        miniflare: {
-          bindings: {
-            // Pass environment variables to Workers runtime for integration tests
-            // Use empty strings as defaults since undefined is rejected
-            GITHUB_TOKEN: process.env.GITHUB_TOKEN ?? '',
-            RUN_INTEGRATION_TESTS: process.env.RUN_INTEGRATION_TESTS ?? '',
-          },
-        },
-      },
-    },
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
