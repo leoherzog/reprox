@@ -14,9 +14,14 @@
 
 import type { RpmPackageEntry, RpmHeaderData, AssetLike } from '../types';
 import { sha256, gzipCompress } from '../utils/crypto';
-import { extractRpmMetadata } from '../parsers/rpm';
+import { extractRpmMetadata, RpmHeaderTruncatedError, RPM_DEFAULT_RANGE_SIZE } from '../parsers/rpm';
 import { extractRpmArchFromFilename } from '../utils/architectures';
 import { escapeXml } from '../utils/xml';
+
+// Retry ladder for oversized RPM headers. 256KB fits the overwhelming
+// majority; the jumps handle packages with enormous file lists. We cap at 4MB
+// to avoid pulling the entire payload; anything bigger is dropped with a warn.
+const RPM_RANGE_RETRY_LADDER = [RPM_DEFAULT_RANGE_SIZE, 1024 * 1024, 4 * 1024 * 1024];
 
 /**
  * Metadata file info for repomd.xml generation
@@ -185,6 +190,11 @@ function generatePackageXml(pkg: RpmPackageEntry): string {
   const providesXml = formatDepSection('provides', headerData.provides, headerData.provideFlags, headerData.provideVersions);
   const conflictsXml = formatDepSection('conflicts', headerData.conflicts, headerData.conflictFlags, headerData.conflictVersions);
   const obsoletesXml = formatDepSection('obsoletes', headerData.obsoletes, headerData.obsoleteFlags, headerData.obsoleteVersions);
+  // File-dep paths. DNF reads these from <format> so it can resolve
+  // `Requires: /usr/bin/foo` without parsing filelists.xml.
+  const filesXml = headerData.primaryFiles.length > 0
+    ? '\n' + headerData.primaryFiles.map(f => `      <file>${escapeXml(f)}</file>`).join('\n')
+    : '';
 
   return `  <package type="rpm">
     <name>${escapeXml(headerData.name)}</name>
@@ -203,7 +213,7 @@ function generatePackageXml(pkg: RpmPackageEntry): string {
       <rpm:vendor>${escapeXml(headerData.vendor)}</rpm:vendor>
       <rpm:group>${escapeXml(headerData.group || 'Unspecified')}</rpm:group>
       <rpm:sourcerpm>${escapeXml(headerData.sourceRpm)}</rpm:sourcerpm>
-${requiresXml}
+${requiresXml}${filesXml}
 ${providesXml}
 ${conflictsXml}
 ${obsoletesXml}
@@ -274,13 +284,29 @@ ${changelogXml}
 
 /**
  * Build an RpmPackageEntry from a GitHub asset
- * Uses GitHub's digest field for the checksum when available
+ * Uses GitHub's digest field for the checksum when available.
+ *
+ * Retries with progressively larger range requests when the RPM header
+ * exceeds the fetched window (large file lists); returns null past the cap.
  */
 export async function buildRpmPackageEntry(
   asset: AssetLike,
   githubToken?: string
-): Promise<RpmPackageEntry> {
-  const headerData = await extractRpmMetadata(asset.browser_download_url, githubToken);
+): Promise<RpmPackageEntry | null> {
+  let headerData: RpmHeaderData | undefined;
+  for (const size of RPM_RANGE_RETRY_LADDER) {
+    try {
+      headerData = await extractRpmMetadata(asset.browser_download_url, githubToken, size);
+      break;
+    } catch (err) {
+      if (err instanceof RpmHeaderTruncatedError) continue;
+      throw err;
+    }
+  }
+  if (!headerData) {
+    console.warn(`RPM header exceeds ${RPM_RANGE_RETRY_LADDER[RPM_RANGE_RETRY_LADDER.length - 1]} bytes; dropping ${asset.browser_download_url}`);
+    return null;
+  }
 
   // Override arch from filename if header doesn't have it
   if (!headerData.arch || headerData.arch === '') {

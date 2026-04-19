@@ -146,6 +146,9 @@ export interface RpmHeaderData {
   obsoleteFlags: number[];
   // File list data
   files: string[];
+  // Subset of `files` whose paths match createrepo_c's "primary" prefix list.
+  // Emitted in primary.xml <format><file>...</file> for DNF file-dep resolution.
+  primaryFiles: string[];
   // Changelog data
   changelog: RpmChangelogEntry[];
 }

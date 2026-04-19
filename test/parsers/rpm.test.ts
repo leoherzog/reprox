@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseRpmBuffer } from '../../src/parsers/rpm';
+import { parseRpmBuffer, RpmHeaderTruncatedError } from '../../src/parsers/rpm';
 import { extractRpmArchFromFilename } from '../../src/utils/architectures';
 
 // ============================================================================
@@ -377,6 +377,43 @@ describe('parseRpmBuffer', () => {
 
     expect(() => parseRpmBuffer(buffer)).toThrow(/Invalid RPM header magic/);
   });
+
+  it('throws RpmHeaderTruncatedError when declared hsize exceeds buffer', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+
+    // Forge a main-header header-header declaring a huge data section.
+    // We include no index entries so nindex*16 == 0 but hsize says 10MB.
+    const fakeMainHeader = new Uint8Array(16); // just the header-header
+    const hhView = new DataView(fakeMainHeader.buffer);
+    fakeMainHeader[0] = 0x8e;
+    fakeMainHeader[1] = 0xad;
+    fakeMainHeader[2] = 0xe8;
+    fakeMainHeader[3] = 1; // version
+    hhView.setUint32(8, 0, false); // nindex = 0
+    hhView.setUint32(12, 10 * 1024 * 1024, false); // hsize = 10MB (way bigger than buffer)
+
+    const totalSize = lead.length + sigHeader.length + sigPadding + fakeMainHeader.length;
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(fakeMainHeader, offset);
+
+    let caught: unknown;
+    try {
+      parseRpmBuffer(buffer);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(RpmHeaderTruncatedError);
+    const err = caught as RpmHeaderTruncatedError;
+    expect(err.required).toBeGreaterThan(err.available);
+  });
 });
 
 // ============================================================================
@@ -553,6 +590,58 @@ describe('parseRpmBuffer file list handling', () => {
 
     const result = parseRpmBuffer(buffer);
     expect(result.files).toEqual([]);
+  });
+
+  it('filters primaryFiles to createrepo_c primary-file prefixes', () => {
+    const lead = createRpmLead();
+    const sigHeader = createRpmHeader([]);
+    const mainHeader = createRpmHeader([
+      { tag: 1000, type: 6, value: 'mixed-paths-pkg' },
+      { tag: 1001, type: 6, value: '1.0.0' },
+      { tag: 1002, type: 6, value: '1' },
+      // Mix of interesting and uninteresting prefixes
+      { tag: RPMTAG_DIRNAMES, type: 8, value: [
+        '/usr/bin/',
+        '/usr/share/doc/mixed-paths-pkg/',
+        '/etc/',
+        '/usr/lib64/',
+        '/opt/custom/',
+        '/usr/share/',
+      ] },
+      { tag: RPMTAG_BASENAMES, type: 8, value: [
+        'myapp',           // /usr/bin/myapp     -> primary
+        'README',          // /usr/share/doc/... -> skip
+        'myapp.conf',      // /etc/myapp.conf    -> primary
+        'libmyapp.so',     // /usr/lib64/...     -> primary
+        'special',         // /opt/custom/...    -> skip
+        'magic',           // /usr/share/magic   -> primary (exact match)
+      ] },
+      { tag: RPMTAG_DIRINDEXES, type: 4, value: [0, 1, 2, 3, 4, 5] },
+    ]);
+
+    const sigPadding = (8 - (sigHeader.length % 8)) % 8;
+    const totalSize = lead.length + sigHeader.length + sigPadding + mainHeader.length;
+
+    const buffer = new ArrayBuffer(totalSize);
+    const view = new Uint8Array(buffer);
+    let offset = 0;
+    view.set(lead, offset);
+    offset += lead.length;
+    view.set(sigHeader, offset);
+    offset += sigHeader.length + sigPadding;
+    view.set(mainHeader, offset);
+
+    const result = parseRpmBuffer(buffer);
+
+    // Full file list unchanged (all paths present)
+    expect(result.files).toHaveLength(6);
+    // Only the interesting prefixes retained in primaryFiles
+    expect(result.primaryFiles.sort()).toEqual([
+      '/etc/myapp.conf',
+      '/usr/bin/myapp',
+      '/usr/lib64/libmyapp.so',
+      '/usr/share/magic',
+    ]);
   });
 
   it('uses default dirname when DIRINDEXES is missing', () => {

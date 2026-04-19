@@ -44,6 +44,7 @@ function createRpmHeaderData(overrides: Partial<RpmHeaderData> = {}): RpmHeaderD
     obsoleteVersions: [],
     obsoleteFlags: [],
     files: [],
+    primaryFiles: [],
     changelog: [],
     ...overrides,
   };

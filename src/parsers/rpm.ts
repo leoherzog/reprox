@@ -1,6 +1,22 @@
 import type { RpmHeaderData, RpmChangelogEntry } from '../types';
 
 /**
+ * Thrown when the declared main-header size exceeds the buffer returned by
+ * the range request. Callers can catch this specifically and retry with a
+ * larger range rather than silently dropping the package.
+ */
+export class RpmHeaderTruncatedError extends Error {
+  readonly required: number;
+  readonly available: number;
+  constructor(required: number, available: number) {
+    super(`RPM header truncated: need ${required} bytes, have ${available}`);
+    this.name = 'RpmHeaderTruncatedError';
+    this.required = required;
+    this.available = available;
+  }
+}
+
+/**
  * RPM Package Parser
  *
  * Extracts metadata from .rpm packages using Range Requests.
@@ -120,18 +136,21 @@ function normalizeToNumberArray(value: string | number | string[] | number[] | u
   return [Number(value)];
 }
 
-// Range request size for RPM headers (file lists can be larger)
-const RANGE_REQUEST_SIZE = 262144; // 256KB
+// Default range request size for RPM headers (file lists can push past this)
+export const RPM_DEFAULT_RANGE_SIZE = 262144; // 256KB
 
 /**
  * Extract metadata from an RPM package URL using Range Request.
+ * The caller may override `rangeSize` to retry with a larger window when the
+ * parser reports truncation (see RpmHeaderTruncatedError).
  */
 export async function extractRpmMetadata(
   assetUrl: string,
-  githubToken?: string
+  githubToken?: string,
+  rangeSize: number = RPM_DEFAULT_RANGE_SIZE
 ): Promise<RpmHeaderData> {
   const headers: HeadersInit = {
-    Range: `bytes=0-${RANGE_REQUEST_SIZE - 1}`,
+    Range: `bytes=0-${rangeSize - 1}`,
     Accept: 'application/octet-stream',
   };
 
@@ -183,6 +202,9 @@ export function parseRpmBuffer(buffer: ArrayBuffer): RpmHeaderData {
   // Build file list from basenames, dirnames, and dirindexes
   const files = buildFileList(headerData);
 
+  // Subset retained for primary.xml <format><file> emission.
+  const primaryFiles = files.filter(isPrimaryFile);
+
   // Build changelog from time, name, and text arrays
   const changelog = buildChangelog(headerData);
 
@@ -215,8 +237,45 @@ export function parseRpmBuffer(buffer: ArrayBuffer): RpmHeaderData {
     obsoleteVersions: normalizeToStringArray(headerData[RPMTAG.OBSOLETEVERSION]),
     obsoleteFlags: normalizeToNumberArray(headerData[RPMTAG.OBSOLETEFLAGS]),
     files,
+    primaryFiles,
     changelog,
   };
+}
+
+/**
+ * createrepo_c's primary-metadata file filter: paths under these prefixes (or
+ * the exact filenames listed) are emitted in primary.xml <format><file> so DNF
+ * can resolve file-based Requires without reading filelists.xml.
+ *
+ * Ref: createrepo_c's primary_files[] in src/misc.c. Config-file detection
+ * (RPMFILEFLAGS with RPMFILE_CONFIG) is not implemented here — the prefix list
+ * is what DNF needs for the common "Requires: /usr/bin/foo" pattern.
+ */
+const PRIMARY_FILE_PREFIXES = [
+  '/etc/',
+  '/bin/',
+  '/sbin/',
+  '/lib/',
+  '/lib64/',
+  '/usr/bin/',
+  '/usr/sbin/',
+  '/usr/lib/',
+  '/usr/lib64/',
+  '/usr/libexec/',
+  '/usr/games/',
+  '/usr/share/dict/',
+];
+const PRIMARY_FILE_EXACT = [
+  '/usr/share/magic.mime',
+  '/usr/share/magic',
+];
+
+function isPrimaryFile(path: string): boolean {
+  if (PRIMARY_FILE_EXACT.includes(path)) return true;
+  for (const p of PRIMARY_FILE_PREFIXES) {
+    if (path.startsWith(p)) return true;
+  }
+  return false;
 }
 
 /**
@@ -311,6 +370,14 @@ function parseHeader(
 
   const indexStart = offset + HEADER_HEADER_SIZE;
   const dataStart = indexStart + (nindex * 16);
+  const headerEnd = dataStart + hsize;
+
+  // The range request may not have fetched the full header. Surface this
+  // distinctly so callers can retry with a larger range instead of dropping
+  // the package on a generic RangeError from an OOB DataView read below.
+  if (headerEnd > bytes.length) {
+    throw new RpmHeaderTruncatedError(headerEnd, bytes.length);
+  }
 
   const result: Record<number, string | number | string[] | number[]> = {};
 
