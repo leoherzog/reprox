@@ -56,10 +56,6 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - `releaseVariant` - `'stable'` (default) or `'prerelease'`
 - `type` - Route type (inrelease, packages, binary, repomd, rpm-binary, etc.)
 
-**AggregatedAsset** (`src/types.ts`) - Asset with release context:
-- Extends `GitHubAsset` with `releaseTagName` and `releaseId`
-- Used to track which release each package came from
-
 **GitHubRelease** (`src/types.ts`) - Release metadata:
 - `published_at` is `string | null` - null indicates a draft release (excluded from processing)
 
@@ -74,7 +70,7 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 **Generators** (`src/generators/`)
 - `packages.ts` - APT Packages file generation, `filterDebAssets()` (requires valid digest)
 - `release.ts` - APT Release/InRelease generation
-- `repodata.ts` - RPM primary.xml, filelists.xml, other.xml generation, `filterRpmAssets()` (requires valid digest)
+- `repodata.ts` - RPM primary.xml, filelists.xml, other.xml generation. `buildRepomd()` emits repomd.xml with hash-prefixed `<location>` paths and returns the per-section SHA256s so callers can key blob writes. `filterRpmAssets()` enforces valid digests.
 
 **Utilities** (`src/utils/`)
 - `crypto.ts` - SHA256 hashing and gzip compression (Web Crypto API)
@@ -121,6 +117,7 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - `computeReleaseIdsHash()` (async) computes SHA256 of release IDs + asset digests for cache invalidation
 - Asset URLs are cached for efficient binary redirects
 - Background validation refreshes cache without blocking requests
+- RPM metadata files (primary/filelists/other, both .xml and .xml.gz) are stored as **content-addressed blobs** keyed by their SHA256. `repomd.xml` references them via `<location href="repodata/{sha256}-primary.xml.gz"/>` (Fedora's `unique_md_filenames` convention). Blobs are immutable — a client holding any historical `repomd.xml` resolves its references against the exact bytes that were hashed into it, eliminating the race where background refresh could update `primary.xml.gz` between a client's `repomd.xml` fetch and its follow-up fetches.
 
 **Concurrency Limiting:**
 - Cloudflare Workers has subrequest limits (50 free tier, 1000 paid)
@@ -139,13 +136,17 @@ All cache keys include the release variant for proper isolation:
 
 | Type | Key Pattern |
 |------|-------------|
-| APT Packages | `packages/{variant}/{owner}/{repo}/{arch}` |
+| APT Packages Blob (content-addressed; backs both by-hash and legacy URLs) | `packages-blob/{variant}/{owner}/{repo}/{sha256}` |
 | APT Release | `release/{variant}/{owner}/{repo}` |
 | APT InRelease | `inrelease/{variant}/{owner}/{repo}` |
+| APT Release.gpg | `release-gpg/{variant}/{owner}/{repo}` |
 | Release IDs Hash | `release-ids-hash/{variant}/{owner}/{repo}` |
-| Asset URL | `asset-url/{variant}/{owner}/{repo}/{filename}` |
-| RPM Primary | `rpm/primary/{variant}/{owner}/{repo}` |
+| Asset URL | `asset-url/{variant}/{owner}/{repo}/{releaseHash}/{filename}` |
 | RPM Repomd | `rpm/repomd/{variant}/{owner}/{repo}` |
+| RPM Repomd.asc | `rpm/repomd-asc/{variant}/{owner}/{repo}` |
+| RPM Blob (content-addressed) | `rpm/blob/{variant}/{owner}/{repo}/{sha256}` |
+
+The legacy `binary-{arch}/Packages[.gz]` URL has no dedicated mutable key — `handlePackages`/`handlePackagesGz` parses the current cached `Release`, extracts the SHA256 for the requested path, and serves the content-addressed blob. This inherits the blob cache's immutability: a concurrent refresh producing a newer Release cannot corrupt in-flight client responses.
 
 ### Cloudflare Workers Considerations
 
@@ -337,10 +338,12 @@ The `getAllReleases()` function has a `MAX_PAGES = 50` limit to prevent infinite
 
 ### Cache Consistency
 
-**Critical**: Metadata files containing checksums (Release, InRelease, repomd.xml) must always be regenerated together with the files they reference (Packages, primary.xml, etc.). If they're cached independently and refreshed at different times, clients will see checksum mismatches.
+Metadata files containing checksums (Release, InRelease, repomd.xml) reference other files (Packages, primary.xml, etc.). Sequential client fetches — DNF does `repomd.xml` → `primary.xml.gz` → packages — must see a consistent snapshot, or the client will reject a checksum mismatch.
 
-**APT**: `generateAndCacheAll()` regenerates all files atomically - Packages for all architectures, Release, InRelease, and Release.gpg together.
+**APT**: `Acquire-By-Hash: yes` is advertised in `Release`, and Packages files (both uncompressed and `.gz`) are stored as **immutable, content-addressed blobs** under `packages-blob/{variant}/{owner}/{repo}/{sha256}`. `handleByHash` is a pure cache lookup — given a hash pinned by any (In)Release a client holds, it returns the exact bytes that were hashed, or 404 if the blob has aged out. `generateAndCacheAll()` and `generateReleaseContent()` write these blobs BEFORE writing the (In)Release/Release.gpg that reference them, so any client reading a cached Release can always resolve every by-hash URL. The legacy non-by-hash URL `binary-{arch}/Packages[.gz]` is served the same way: `handlePackages`/`handlePackagesGz` parses the current cached Release, extracts the path's SHA256, and returns the blob — so non-by-hash clients see a fresh-Release-matching body as well. There is no separate mutable `packages/.../{arch}` key.
 
-**RPM**: Both `validateAndRefreshRpmCache()` and `validateAndRefreshRepomd()` regenerate ALL metadata atomically - primary.xml, filelists.xml, other.xml, repomd.xml, and repomd.xml.asc together. This prevents checksum mismatches between repomd.xml and the XML files it references.
+**RPM**: Uses Fedora's `unique_md_filenames` convention — `repomd.xml` references `repodata/{sha256}-primary.xml.gz` (and filelists/other). The XML files are stored as **immutable, content-addressed blobs** under `rpm/blob/{variant}/{owner}/{repo}/{sha256}`, so any `repomd.xml` a client holds (stale or fresh) resolves to the exact bytes that were hashed into it. `buildRpmSnapshot()` generates everything from scratch in one pass; `cacheRpmSnapshot()` writes blobs before `repomd.xml` so references are always resolvable.
 
-**Stale-While-Revalidate**: The cache uses a stale-while-revalidate pattern - cached content is returned immediately while freshness is validated in background. This means the first request after a new release may receive stale (but internally consistent) data. Subsequent requests get fresh data. For immediate invalidation, use `?cache=false` query parameter.
+**Stale-While-Revalidate**: The cache uses a stale-while-revalidate pattern — cached content is returned immediately while freshness is validated in background. For RPM (always), APT by-hash, and APT non-by-hash (because the legacy URL also serves via blob lookup against the current Release) this is race-free by construction: blobs are content-addressed and immutable, and every path pinned by a Release exists before the Release itself is written. The only remaining race is the normal one inherent to stale-while-revalidate: a client can fetch Release v1, then fetch Packages after the server has refreshed to v2. Under `Acquire-By-Hash` (default `yes` in apt ≥ 1.2, released April 2016) the client uses the v1 hash and gets v1 bytes; non-by-hash clients get v2 bytes (matching v2's current Release, not v1's) and will pick up v2 on their next refresh round. For immediate invalidation, use `?cache=false`.
+
+**Why this matters (the bug this design fixes)**: before content-addressing, a DNF update fetching a repo immediately after a new GitHub release could get a stale `repomd.xml` referencing v1 checksums, then follow up with `primary.xml.gz` after the background refresh had already written v2 bytes under the same URL. DNF would compute the v2 checksum, compare against v1, and fail with `Downloading successful, but checksum doesn't match`. The APT analogue was `Hash Sum mismatch` — a client reads cached `InRelease` v1 (pinning v1 `Packages` SHA256), the background refresh rewrites the mutable `packages/.../{arch}` key with v2 bytes, then the client fetches the Packages file and apt computes v2's SHA256 against v1's pin and aborts. Hashed filenames + immutable blobs (RPM `rpm/blob/...`, APT `packages-blob/...`) make both races impossible. The mutable `packages/.../{arch}` key has been eliminated entirely: the legacy non-by-hash URL now serves the same content-addressed blob that `handleByHash` does, resolved by reading the current Release's SHA256 — so even a non-by-hash client sees a self-consistent `(Release, Packages)` snapshot per request.
