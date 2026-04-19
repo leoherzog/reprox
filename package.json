@@ -10,6 +10,8 @@
     "dev": "npm run build:readme && wrangler dev",
     "predeploy": "npm run build:readme",
     "deploy": "wrangler deploy",
+    "preupload": "npm run build:readme",
+    "upload": "wrangler versions upload",
     "pretest": "npm run build:readme",
     "test": "vitest",
     "typecheck": "npm run build:readme && tsc --noEmit"

@@ -48,12 +48,27 @@ function getGitHubRepo(): string {
 }
 
 /**
- * Get git version info - prefer release tag, fallback to commit hash
+ * Get version info — prefer package.json (set by release bump), then git tag, then commit.
+ * package.json is authoritative on the prod branch; git tags may not be fetched in
+ * Cloudflare Workers Builds checkouts, so we can't rely on `git describe` alone.
  */
 function getGitInfo(): { version: string; url: string; label: string } {
   const repo = getGitHubRepo();
 
-  // Try to get tag if HEAD is exactly tagged
+  try {
+    const pkg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8'));
+    if (pkg.version && pkg.version !== 'dev') {
+      const tag = `v${pkg.version}`;
+      return {
+        version: tag,
+        url: `https://github.com/${repo}/releases/tag/${tag}`,
+        label: 'Release',
+      };
+    }
+  } catch {
+    // Fall through
+  }
+
   try {
     const tag = execSync('git describe --tags --exact-match HEAD', {
       encoding: 'utf-8',
@@ -65,7 +80,6 @@ function getGitInfo(): { version: string; url: string; label: string } {
       label: 'Release',
     };
   } catch {
-    // Fall back to short commit hash
     const commit = execSync('git rev-parse --short HEAD', { encoding: 'utf-8' }).trim();
     return {
       version: commit,
