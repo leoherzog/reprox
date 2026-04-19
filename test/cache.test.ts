@@ -78,60 +78,6 @@ describe('CacheManager', () => {
   });
 
   // ==========================================================================
-  // APT Packages File Tests
-  // ==========================================================================
-
-  describe('Packages file caching', () => {
-    it('stores and retrieves Packages file', async () => {
-      const content = 'Package: test\nVersion: 1.0\n';
-
-      await cacheManager.setPackagesFile('owner', 'repo', 'amd64', variant, content);
-      const result = await cacheManager.getPackagesFile('owner', 'repo', 'amd64', variant);
-
-      expect(result).toBe(content);
-    });
-
-    it('returns null for uncached Packages file', async () => {
-      const result = await cacheManager.getPackagesFile('owner', 'repo', 'amd64', variant);
-
-      expect(result).toBeNull();
-    });
-
-    it('caches different architectures separately', async () => {
-      await cacheManager.setPackagesFile('owner', 'repo', 'amd64', variant, 'amd64 content');
-      await cacheManager.setPackagesFile('owner', 'repo', 'arm64', variant, 'arm64 content');
-
-      const amd64 = await cacheManager.getPackagesFile('owner', 'repo', 'amd64', variant);
-      const arm64 = await cacheManager.getPackagesFile('owner', 'repo', 'arm64', variant);
-
-      expect(amd64).toBe('amd64 content');
-      expect(arm64).toBe('arm64 content');
-    });
-
-    it('caches different repos separately', async () => {
-      await cacheManager.setPackagesFile('owner', 'repo1', 'amd64', variant, 'repo1 content');
-      await cacheManager.setPackagesFile('owner', 'repo2', 'amd64', variant, 'repo2 content');
-
-      const repo1 = await cacheManager.getPackagesFile('owner', 'repo1', 'amd64', variant);
-      const repo2 = await cacheManager.getPackagesFile('owner', 'repo2', 'amd64', variant);
-
-      expect(repo1).toBe('repo1 content');
-      expect(repo2).toBe('repo2 content');
-    });
-
-    it('caches different variants separately', async () => {
-      await cacheManager.setPackagesFile('owner', 'repo', 'amd64', 'stable', 'stable content');
-      await cacheManager.setPackagesFile('owner', 'repo', 'amd64', 'prerelease', 'prerelease content');
-
-      const stable = await cacheManager.getPackagesFile('owner', 'repo', 'amd64', 'stable');
-      const prerelease = await cacheManager.getPackagesFile('owner', 'repo', 'amd64', 'prerelease');
-
-      expect(stable).toBe('stable content');
-      expect(prerelease).toBe('prerelease content');
-    });
-  });
-
-  // ==========================================================================
   // APT Release File Tests
   // ==========================================================================
 
@@ -233,54 +179,105 @@ describe('CacheManager', () => {
   // RPM Caching Tests
   // ==========================================================================
 
-  describe('RPM primary.xml caching', () => {
-    it('stores and retrieves primary.xml', async () => {
-      const content = '<metadata><package>...</package></metadata>';
+  describe('APT Packages blob caching (content-addressed)', () => {
+    const hash = 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef';
 
-      await cacheManager.setRpmPrimaryXml('owner', 'repo', variant, content);
-      const result = await cacheManager.getRpmPrimaryXml('owner', 'repo', variant);
+    it('stores and retrieves a blob by SHA256', async () => {
+      const body = new TextEncoder().encode('Package: test\nVersion: 1.0\n');
+      await cacheManager.setPackagesBlob('owner', 'repo', variant, hash, body, 'text/plain');
 
-      expect(result).toBe(content);
+      const cached = await cacheManager.getPackagesBlob('owner', 'repo', variant, hash);
+      expect(cached).not.toBeNull();
+      expect(await cached!.text()).toBe('Package: test\nVersion: 1.0\n');
     });
 
-    it('returns null for uncached primary.xml', async () => {
-      const result = await cacheManager.getRpmPrimaryXml('owner', 'repo', variant);
+    it('preserves the stored Content-Type for .gz blobs', async () => {
+      const gzipBody = new Uint8Array([0x1f, 0x8b, 0x08, 0x00, 0x00]);
+      await cacheManager.setPackagesBlob('owner', 'repo', variant, hash, gzipBody, 'application/gzip');
 
+      const cached = await cacheManager.getPackagesBlob('owner', 'repo', variant, hash);
+      expect(cached!.headers.get('Content-Type')).toBe('application/gzip');
+    });
+
+    it('returns null for uncached blobs', async () => {
+      const result = await cacheManager.getPackagesBlob('owner', 'repo', variant, hash);
       expect(result).toBeNull();
+    });
+
+    it('isolates blobs by release variant', async () => {
+      const body = new TextEncoder().encode('stable packages');
+      await cacheManager.setPackagesBlob('owner', 'repo', 'stable', hash, body, 'text/plain');
+
+      const fromPrerelease = await cacheManager.getPackagesBlob('owner', 'repo', 'prerelease', hash);
+      expect(fromPrerelease).toBeNull();
+    });
+
+    it('keys blobs by their hash so old hashes survive new writes', async () => {
+      // Simulates the stale-while-revalidate race: v1 Packages gets hash A,
+      // then regeneration produces v2 Packages with hash B. Both blobs must
+      // remain retrievable for the old-Release client.
+      const hashV1 = '1'.repeat(64);
+      const hashV2 = '2'.repeat(64);
+      await cacheManager.setPackagesBlob('owner', 'repo', variant, hashV1, new TextEncoder().encode('v1'), 'text/plain');
+      await cacheManager.setPackagesBlob('owner', 'repo', variant, hashV2, new TextEncoder().encode('v2'), 'text/plain');
+
+      expect(await (await cacheManager.getPackagesBlob('owner', 'repo', variant, hashV1))!.text()).toBe('v1');
+      expect(await (await cacheManager.getPackagesBlob('owner', 'repo', variant, hashV2))!.text()).toBe('v2');
+    });
+
+    it('does not collide with rpm blob keyspace', async () => {
+      // Same hash, different keyspaces must not share storage.
+      await cacheManager.setPackagesBlob('owner', 'repo', variant, hash, new TextEncoder().encode('apt'), 'text/plain');
+      await cacheManager.setRpmBlob('owner', 'repo', variant, hash, new TextEncoder().encode('rpm'), 'application/xml');
+
+      expect(await (await cacheManager.getPackagesBlob('owner', 'repo', variant, hash))!.text()).toBe('apt');
+      expect(await (await cacheManager.getRpmBlob('owner', 'repo', variant, hash))!.text()).toBe('rpm');
     });
   });
 
-  describe('RPM filelists.xml caching', () => {
-    it('stores and retrieves filelists.xml', async () => {
-      const content = '<filelists><package>...</package></filelists>';
+  describe('RPM blob caching (content-addressed)', () => {
+    const hash = 'abc123def456abc123def456abc123def456abc123def456abc123def4560000';
 
-      await cacheManager.setRpmFilelistsXml('owner', 'repo', variant, content);
-      const result = await cacheManager.getRpmFilelistsXml('owner', 'repo', variant);
+    it('stores and retrieves a blob by SHA256', async () => {
+      const body = new TextEncoder().encode('<metadata>primary</metadata>');
+      await cacheManager.setRpmBlob('owner', 'repo', variant, hash, body, 'application/xml');
 
-      expect(result).toBe(content);
+      const cached = await cacheManager.getRpmBlob('owner', 'repo', variant, hash);
+      expect(cached).not.toBeNull();
+      expect(await cached!.text()).toBe('<metadata>primary</metadata>');
     });
 
-    it('returns null for uncached filelists.xml', async () => {
-      const result = await cacheManager.getRpmFilelistsXml('owner', 'repo', variant);
+    it('preserves the stored Content-Type', async () => {
+      const gzipBody = new Uint8Array([0x1f, 0x8b, 0x08, 0x00]);
+      await cacheManager.setRpmBlob('owner', 'repo', variant, hash, gzipBody, 'application/gzip');
 
+      const cached = await cacheManager.getRpmBlob('owner', 'repo', variant, hash);
+      expect(cached!.headers.get('Content-Type')).toBe('application/gzip');
+    });
+
+    it('returns null for uncached blobs', async () => {
+      const result = await cacheManager.getRpmBlob('owner', 'repo', variant, hash);
       expect(result).toBeNull();
     });
-  });
 
-  describe('RPM other.xml caching', () => {
-    it('stores and retrieves other.xml', async () => {
-      const content = '<otherdata><package>...</package></otherdata>';
+    it('isolates blobs by release variant', async () => {
+      const body = new TextEncoder().encode('stable body');
+      await cacheManager.setRpmBlob('owner', 'repo', 'stable', hash, body, 'application/xml');
 
-      await cacheManager.setRpmOtherXml('owner', 'repo', variant, content);
-      const result = await cacheManager.getRpmOtherXml('owner', 'repo', variant);
-
-      expect(result).toBe(content);
+      const fromPrerelease = await cacheManager.getRpmBlob('owner', 'repo', 'prerelease', hash);
+      expect(fromPrerelease).toBeNull();
     });
 
-    it('returns null for uncached other.xml', async () => {
-      const result = await cacheManager.getRpmOtherXml('owner', 'repo', variant);
+    it('keys blobs by their hash, not by kind', async () => {
+      // Two different bodies stored under distinct hashes should both be
+      // retrievable — no shared key collision between primary/filelists/other.
+      const hashA = '1'.repeat(64);
+      const hashB = '2'.repeat(64);
+      await cacheManager.setRpmBlob('owner', 'repo', variant, hashA, new TextEncoder().encode('A'), 'application/xml');
+      await cacheManager.setRpmBlob('owner', 'repo', variant, hashB, new TextEncoder().encode('B'), 'application/xml');
 
-      expect(result).toBeNull();
+      expect(await (await cacheManager.getRpmBlob('owner', 'repo', variant, hashA))!.text()).toBe('A');
+      expect(await (await cacheManager.getRpmBlob('owner', 'repo', variant, hashB))!.text()).toBe('B');
     });
   });
 
@@ -289,15 +286,15 @@ describe('CacheManager', () => {
   // ==========================================================================
 
   describe('cache key isolation', () => {
-    it('APT and RPM caches are separate', async () => {
-      await cacheManager.setPackagesFile('owner', 'repo', 'amd64', variant, 'deb packages');
-      await cacheManager.setRpmPrimaryXml('owner', 'repo', variant, 'rpm primary');
+    it('APT Release and RPM repomd caches are separate', async () => {
+      await cacheManager.setReleaseFile('owner', 'repo', variant, 'apt release');
+      await cacheManager.setRpmRepomd('owner', 'repo', variant, 'rpm repomd xml');
 
-      const debPackages = await cacheManager.getPackagesFile('owner', 'repo', 'amd64', variant);
-      const rpmPrimary = await cacheManager.getRpmPrimaryXml('owner', 'repo', variant);
+      const aptRelease = await cacheManager.getReleaseFile('owner', 'repo', variant);
+      const rpmRepomd = await cacheManager.getRpmRepomd('owner', 'repo', variant);
 
-      expect(debPackages).toBe('deb packages');
-      expect(rpmPrimary).toBe('rpm primary');
+      expect(aptRelease).toBe('apt release');
+      expect(rpmRepomd).toBe('rpm repomd xml');
     });
 
     it('Release and InRelease are separate', async () => {
@@ -317,11 +314,13 @@ describe('CacheManager', () => {
   // ==========================================================================
 
   describe('TTL configuration', () => {
+    const hash = 'd'.repeat(64);
+
     it('uses default TTL of 86400 seconds for content', async () => {
       const manager = new CacheManager(mockCache as unknown as Cache);
-      await manager.setPackagesFile('owner', 'repo', 'amd64', variant, 'content');
+      await manager.setReleaseFile('owner', 'repo', variant, 'content');
 
-      const headers = mockCache.getStoredHeaders('https://reprox.internal/packages/stable/owner/repo/amd64');
+      const headers = mockCache.getStoredHeaders('https://reprox.internal/release/stable/owner/repo');
       expect(headers?.get('Cache-Control')).toBe('public, max-age=86400');
     });
 
@@ -336,9 +335,9 @@ describe('CacheManager', () => {
     it('uses custom TTL for content when provided', async () => {
       const customTtl = 3600;
       const manager = new CacheManager(mockCache as unknown as Cache, customTtl);
-      await manager.setPackagesFile('owner', 'repo', 'amd64', variant, 'content');
+      await manager.setPackagesBlob('owner', 'repo', variant, hash, new TextEncoder().encode('x'), 'text/plain');
 
-      const headers = mockCache.getStoredHeaders('https://reprox.internal/packages/stable/owner/repo/amd64');
+      const headers = mockCache.getStoredHeaders(`https://reprox.internal/packages-blob/stable/owner/repo/${hash}`);
       expect(headers?.get('Cache-Control')).toBe('public, max-age=3600');
     });
 
@@ -390,40 +389,6 @@ describe('CacheManager', () => {
     });
   });
 
-  describe('RPM timestamp caching', () => {
-    it('stores and retrieves timestamp', async () => {
-      const timestamp = 1700000000;
-
-      await cacheManager.setRpmTimestamp('owner', 'repo', variant, timestamp);
-      const result = await cacheManager.getRpmTimestamp('owner', 'repo', variant);
-
-      expect(result).toBe(timestamp);
-    });
-
-    it('returns null for uncached timestamp', async () => {
-      const result = await cacheManager.getRpmTimestamp('owner', 'repo', variant);
-
-      expect(result).toBeNull();
-    });
-
-    it('handles large timestamps', async () => {
-      const largeTimestamp = 9999999999999;
-
-      await cacheManager.setRpmTimestamp('owner', 'repo', variant, largeTimestamp);
-      const result = await cacheManager.getRpmTimestamp('owner', 'repo', variant);
-
-      expect(result).toBe(largeTimestamp);
-    });
-
-    it('returns null for non-numeric cached values', async () => {
-      const request = new Request('https://reprox.internal/rpm/timestamp/stable/owner/repo');
-      await mockCache.put(request, new Response('not-a-number'));
-
-      const result = await cacheManager.getRpmTimestamp('owner', 'repo', variant);
-      expect(result).toBeNull();
-    });
-  });
-
   // ==========================================================================
   // clearAllCache Tests
   // ==========================================================================
@@ -446,23 +411,12 @@ describe('CacheManager', () => {
       expect(await cacheManager.getReleaseIdsHash('owner', 'repo', variant)).toBeNull();
     });
 
-    it('clears all RPM cache entries for a repository', async () => {
-      // Set up cache entries
-      await cacheManager.setRpmPrimaryXml('owner', 'repo', variant, 'primary xml');
-      await cacheManager.setRpmFilelistsXml('owner', 'repo', variant, 'filelists xml');
-      await cacheManager.setRpmOtherXml('owner', 'repo', variant, 'other xml');
-      await cacheManager.setRpmTimestamp('owner', 'repo', variant, 1700000000);
+    it('clears repomd.xml and repomd.xml.asc for a repository', async () => {
       await cacheManager.setRpmRepomd('owner', 'repo', variant, 'repomd xml');
       await cacheManager.setRpmRepomdAsc('owner', 'repo', variant, 'repomd asc');
 
-      // Clear all cache
       await cacheManager.clearAllCache('owner', 'repo');
 
-      // Verify all cleared
-      expect(await cacheManager.getRpmPrimaryXml('owner', 'repo', variant)).toBeNull();
-      expect(await cacheManager.getRpmFilelistsXml('owner', 'repo', variant)).toBeNull();
-      expect(await cacheManager.getRpmOtherXml('owner', 'repo', variant)).toBeNull();
-      expect(await cacheManager.getRpmTimestamp('owner', 'repo', variant)).toBeNull();
       expect(await cacheManager.getRpmRepomd('owner', 'repo', variant)).toBeNull();
       expect(await cacheManager.getRpmRepomdAsc('owner', 'repo', variant)).toBeNull();
     });

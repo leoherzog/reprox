@@ -1,6 +1,7 @@
-import type { DebianControlData, PackageEntry, AssetLike } from '../types';
+import type { DebianControlData, PackageEntry, GitHubAsset } from '../types';
 import { parseDebBufferAsync } from '../parsers/deb';
 import { extractArchFromFilename } from '../utils/architectures';
+import { githubHeaders } from '../github/api';
 
 /**
  * Range request size for .deb header parsing
@@ -102,21 +103,13 @@ export async function fetchDebMetadata(
   downloadUrl: string,
   githubToken?: string
 ): Promise<DebianControlData> {
-  // Build headers for range request
-  const headers: HeadersInit = {
-    Range: `bytes=0-${RANGE_SIZE - 1}`,
-    Accept: 'application/octet-stream',
-    'User-Agent': 'Reprox/1.0',
-  };
-
-  if (githubToken) {
-    headers['Authorization'] = `token ${githubToken}`;
-  }
-
   // GitHub download URLs need to follow redirects
   // The browser_download_url redirects to the actual file
   const response = await fetch(downloadUrl, {
-    headers,
+    headers: {
+      ...githubHeaders(githubToken, 'octet-stream'),
+      Range: `bytes=0-${RANGE_SIZE - 1}`,
+    },
     redirect: 'follow',
   });
 
@@ -132,10 +125,7 @@ export async function fetchDebMetadata(
  * Build a PackageEntry from a GitHub asset
  */
 export async function buildPackageEntry(
-  asset: AssetLike,
-  owner: string,
-  repo: string,
-  tag: string,
+  asset: GitHubAsset,
   githubToken?: string
 ): Promise<PackageEntry> {
   // Fetch metadata from .deb header
@@ -181,7 +171,7 @@ export async function buildPackageEntry(
  * Assets without digests (older GitHub releases) are excluded because APT
  * validates checksums against the Packages file.
  */
-export function filterDebAssets<T extends AssetLike>(assets: T[]): T[] {
+export function filterDebAssets<T extends GitHubAsset>(assets: T[]): T[] {
   return assets.filter(asset =>
     asset.name.endsWith('.deb') &&
     asset.digest?.startsWith('sha256:')
@@ -193,7 +183,7 @@ export function filterDebAssets<T extends AssetLike>(assets: T[]): T[] {
  * When arch is 'all', returns only architecture-independent packages.
  * When arch is specific (e.g., 'amd64'), returns packages for that arch plus 'all' packages.
  */
-export function filterByArchitecture<T extends AssetLike>(assets: T[], arch: string): T[] {
+export function filterByArchitecture<T extends GitHubAsset>(assets: T[], arch: string): T[] {
   return assets.filter(asset => {
     const assetArch = extractArchFromFilename(asset.name);
     if (arch === 'all') {

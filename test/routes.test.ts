@@ -222,6 +222,60 @@ describe('parseRoute', () => {
   });
 
   // ============================================================================
+  // RPM Routes - hashed repodata filenames (unique_md_filenames convention)
+  // ============================================================================
+
+  describe('RPM hashed repodata routes', () => {
+    const hash = 'a'.repeat(64);
+
+    it('matches hashed primary.xml.gz', () => {
+      const route = parseRoute(`/owner/repo/repodata/${hash}-primary.xml.gz`);
+      expect(route.type).toBe('primary-gz');
+      expect(route.hash).toBe(hash);
+    });
+
+    it('matches hashed primary.xml (uncompressed)', () => {
+      const route = parseRoute(`/owner/repo/repodata/${hash}-primary.xml`);
+      expect(route.type).toBe('primary');
+      expect(route.hash).toBe(hash);
+    });
+
+    it('matches hashed filelists.xml.gz', () => {
+      const route = parseRoute(`/owner/repo/repodata/${hash}-filelists.xml.gz`);
+      expect(route.type).toBe('filelists-gz');
+      expect(route.hash).toBe(hash);
+    });
+
+    it('matches hashed other.xml.gz', () => {
+      const route = parseRoute(`/owner/repo/repodata/${hash}-other.xml.gz`);
+      expect(route.type).toBe('other-gz');
+      expect(route.hash).toBe(hash);
+    });
+
+    it('matches hashed paths under prerelease variant', () => {
+      const route = parseRoute(`/owner/repo/prerelease/repodata/${hash}-primary.xml.gz`);
+      expect(route.type).toBe('primary-gz');
+      expect(route.releaseVariant).toBe('prerelease');
+      expect(route.hash).toBe(hash);
+    });
+
+    it('rejects non-hex prefixes', () => {
+      const route = parseRoute('/owner/repo/repodata/notahash-primary.xml.gz');
+      expect(route.type).toBe('unknown');
+    });
+
+    it('rejects short hex prefixes', () => {
+      const route = parseRoute('/owner/repo/repodata/abc123-primary.xml.gz');
+      expect(route.type).toBe('unknown');
+    });
+
+    it('rejects unknown kinds', () => {
+      const route = parseRoute(`/owner/repo/repodata/${hash}-somethingelse.xml.gz`);
+      expect(route.type).toBe('unknown');
+    });
+  });
+
+  // ============================================================================
   // RPM Routes - Packages (binary downloads)
   // ============================================================================
 

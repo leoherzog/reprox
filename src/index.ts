@@ -1,5 +1,5 @@
-import type { Env, RouteInfo, PackageEntry, RpmPackageEntry, GitHubRelease, AggregatedAsset } from './types';
-import { GitHubClient, getArchitecturesFromAssets } from './github/api';
+import type { Env, RouteInfo, PackageEntry, RpmPackageEntry, GitHubRelease, GitHubAsset } from './types';
+import { GitHubClient, getArchitecturesFromAssets, githubHeaders } from './github/api';
 import { CacheManager, createCacheManager, computeReleaseIdsHash, type ReleaseVariant } from './cache/cache';
 import { mapWithConcurrencyFiltered } from './utils/concurrency';
 import {
@@ -14,14 +14,14 @@ import {
   buildReleaseEntries,
 } from './generators/release';
 import {
-  generateRepomdXml,
+  buildRepomd,
   generatePrimaryXml,
   generateFilelistsXml,
   generateOtherXml,
   buildRpmPackageEntry,
   filterRpmAssets,
 } from './generators/repodata';
-import type { RepomdFileInfo } from './generators/repodata';
+import type { RepomdHashes } from './generators/repodata';
 import { signCleartext, signDetached, signDetachedBinary, extractPublicKey, getKeyFingerprint } from './signing/gpg';
 import { gzipCompress, sha256 } from './utils/crypto';
 import { README_HTML, README_MARKDOWN } from './generated/readme-html';
@@ -31,15 +31,6 @@ const apiHeaders = {
   'Content-Type': 'application/json',
   'Cache-Control': 'public, max-age=300',
 } as const;
-
-function githubApiHeaders(token?: string): HeadersInit {
-  const h: HeadersInit = {
-    Accept: 'application/vnd.github.v3+json',
-    'User-Agent': 'Reprox/1.0',
-  };
-  if (token) h['Authorization'] = `token ${token}`;
-  return h;
-}
 
 const validNamePattern = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
 
@@ -271,9 +262,13 @@ export function parseRoute(pathname: string): RouteInfo {
   // RPM Repository Routes
   // /{owner}/{repo}(/prerelease)?/repodata/{file}
   if (p(2) === 'repodata') {
-    const repodataRoutes: Record<string, RouteInfo['type']> = {
+    const file = p(3);
+
+    const staticRoutes: Record<string, RouteInfo['type']> = {
       'repomd.xml': 'repomd',
       'repomd.xml.asc': 'repomd-asc',
+      // Unhashed metadata paths are kept for legacy/debugging requests.
+      // Current repomd.xml always emits hashed paths (see below).
       'primary.xml': 'primary',
       'primary.xml.gz': 'primary-gz',
       'filelists.xml': 'filelists',
@@ -281,9 +276,25 @@ export function parseRoute(pathname: string): RouteInfo {
       'other.xml': 'other',
       'other.xml.gz': 'other-gz',
     };
-    const routeType = repodataRoutes[p(3)];
-    if (routeType) {
-      route.type = routeType;
+    const staticRouteType = staticRoutes[file];
+    if (staticRouteType) {
+      route.type = staticRouteType;
+      return route;
+    }
+
+    // Hashed metadata files: `{sha256}-{kind}.xml[.gz]` (unique_md_filenames
+    // convention). Match the hash prefix and route to the content-addressed
+    // blob handler.
+    const hashedMatch = file?.match(/^([0-9a-f]{64})-(primary|filelists|other)\.xml(\.gz)?$/);
+    if (hashedMatch) {
+      const [, hash, kind, gzSuffix] = hashedMatch;
+      const kindToType: Record<string, { plain: RouteInfo['type']; gz: RouteInfo['type'] }> = {
+        primary:   { plain: 'primary',   gz: 'primary-gz' },
+        filelists: { plain: 'filelists', gz: 'filelists-gz' },
+        other:     { plain: 'other',     gz: 'other-gz' },
+      };
+      route.type = gzSuffix ? kindToType[kind].gz : kindToType[kind].plain;
+      route.hash = hash;
       return route;
     }
   }
@@ -303,16 +314,34 @@ export function parseRoute(pathname: string): RouteInfo {
 }
 
 /**
- * Aggregate assets from multiple releases into a single array with release context
+ * Aggregate assets from multiple releases into a single array
  */
-function aggregateAssets(releases: GitHubRelease[]): AggregatedAsset[] {
-  return releases.flatMap(release =>
-    release.assets.map(asset => ({
-      ...asset,
-      releaseTagName: release.tag_name,
-      releaseId: release.id,
-    }))
-  );
+function aggregateAssets(releases: GitHubRelease[]): GitHubAsset[] {
+  return releases.flatMap(release => release.assets);
+}
+
+/**
+ * Most recent non-null published_at as a Date. Falls back to now if every
+ * release has a null published_at (a draft can slip in between pagination
+ * pages if the release was demoted mid-query).
+ */
+function mostRecentReleaseDate(releases: GitHubRelease[]): Date {
+  for (const r of releases) {
+    if (r.published_at !== null) return new Date(r.published_at);
+  }
+  return new Date();
+}
+
+/**
+ * Unix seconds of the most recent non-null published_at, or now if none.
+ */
+function mostRecentReleaseTimestamp(releases: GitHubRelease[]): number {
+  for (const r of releases) {
+    if (r.published_at !== null) {
+      return Math.floor(new Date(r.published_at).getTime() / 1000);
+    }
+  }
+  return Math.floor(Date.now() / 1000);
 }
 
 /**
@@ -407,7 +436,7 @@ async function handleSearchApi(url: URL, env: Env): Promise<Response> {
   // Proxy to GitHub search API with auth
   const ghResponse = await fetch(
     `https://api.github.com/search/repositories?q=${encodeURIComponent(query)}+in:name&per_page=8&sort=stars`,
-    { headers: githubApiHeaders(env.GITHUB_TOKEN) }
+    { headers: githubHeaders(env.GITHUB_TOKEN) }
   );
 
   if (!ghResponse.ok) {
@@ -455,7 +484,7 @@ async function handlePackageApi(url: URL, env: Env): Promise<Response> {
   // Fetch latest release with auth
   const ghResponse = await fetch(
     `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest`,
-    { headers: githubApiHeaders(env.GITHUB_TOKEN) }
+    { headers: githubHeaders(env.GITHUB_TOKEN) }
   );
 
   if (!ghResponse.ok) {
@@ -546,7 +575,7 @@ async function handleInRelease(
     if (cachedInRelease) {
       // Verify cache is still valid by checking GitHub (but we already have content to serve)
       // Do validation in background to not block response
-      ctx.waitUntil(validateAndRefreshCache(route, github, cache, env, ctx));
+      ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
 
       return new Response(cachedInRelease, {
         headers: {
@@ -568,8 +597,14 @@ async function handleInRelease(
     response = releaseContent;
   }
 
-  // Cache in background
-  ctx.waitUntil(cache.setInReleaseFile(owner, repo, releaseVariant, response));
+  // Cache both the signed InRelease and the underlying Release bytes so
+  // follow-up requests (Release, Release.gpg, binary-{arch}/Packages[.gz]
+  // which resolves blobs via the cached Release's SHA256 section) don't
+  // re-fetch all of GitHub.
+  ctx.waitUntil(Promise.all([
+    cache.setInReleaseFile(owner, repo, releaseVariant, response),
+    cache.setReleaseFile(owner, repo, releaseVariant, releaseContent),
+  ]));
 
   return new Response(response, {
     headers: {
@@ -596,7 +631,7 @@ async function handleRelease(
   if (cachedHash) {
     const cachedRelease = await cache.getReleaseFile(owner, repo, releaseVariant);
     if (cachedRelease) {
-      ctx.waitUntil(validateAndRefreshCache(route, github, cache, env, ctx));
+      ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
 
       return new Response(cachedRelease, {
         headers: {
@@ -639,7 +674,7 @@ async function handleReleaseGpg(
   const cachedSignature = await cache.getReleaseGpgSignature(owner, repo, releaseVariant);
   if (cachedSignature) {
     // Validate in background
-    ctx.waitUntil(validateAndRefreshCache(route, github, cache, env, ctx));
+    ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
     return new Response(cachedSignature, {
       headers: {
         'Content-Type': 'application/pgp-signature',
@@ -674,8 +709,7 @@ async function validateAndRefreshCache(
   route: RouteInfo,
   github: GitHubClient,
   cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
+  env: Env
 ): Promise<void> {
   try {
     const { owner, repo, releaseVariant } = route;
@@ -697,7 +731,14 @@ async function validateAndRefreshCache(
 }
 
 /**
- * Generate Release file content with entries for ALL architectures
+ * Generate Release file content with entries for ALL architectures.
+ *
+ * Writes each arch's Packages + Packages.gz into the content-addressed
+ * `packages-blob/.../{sha256}` keyspace BEFORE returning the Release bytes
+ * (which pin those SHA256s), so any follow-up fetch — whether by-hash or the
+ * legacy `binary-{arch}/Packages[.gz]` URL (which resolves by reading the
+ * cached Release's SHA256 and looking up the blob) — always resolves to the
+ * exact bytes Release hashed over.
  */
 async function generateReleaseContent(
   route: RouteInfo,
@@ -743,19 +784,24 @@ async function generateReleaseContent(
     })
   );
 
-  // Populate map and cache results
-  for (const result of archResults) {
-    if (result) {
-      packagesContentByArch.set(result.arch, result.content);
-      ctx.waitUntil(cache.setPackagesFile(owner, repo, result.arch, releaseVariant, result.content));
-    }
-  }
+  // Write content-addressed blobs FIRST (before any Release bytes escape).
+  // Awaited so the blobs exist by the time the caller signs/returns the
+  // Release file.
+  const filteredResults = archResults.filter(
+    (result): result is { arch: string; content: string } => result !== null
+  );
+  await Promise.all(
+    filteredResults.map(async ({ arch, content }) => {
+      packagesContentByArch.set(arch, content);
+      await writeAptPackagesBlobs(cache, owner, repo, releaseVariant, content);
+    })
+  );
 
   // Build Release config with detected architectures and most recent release timestamp
   const config = {
     ...defaultReleaseConfig(owner, repo),
     architectures: architectures,
-    date: new Date(releases[0].published_at!), // Most recent release (non-null: drafts filtered)
+    date: mostRecentReleaseDate(releases),
   };
 
   // Build entries for all architectures
@@ -769,7 +815,38 @@ async function generateReleaseContent(
 }
 
 /**
- * Generate and cache all repository metadata
+ * Write the two content-addressed APT Packages blobs for a single
+ * architecture (uncompressed + gzipped), each keyed by its own SHA256. Blobs
+ * are immutable; the legacy `binary-{arch}/Packages[.gz]` URL serves them by
+ * reading the current Release's SHA256 and doing a blob lookup.
+ */
+async function writeAptPackagesBlobs(
+  cache: CacheManager,
+  owner: string,
+  repo: string,
+  variant: ReleaseVariant,
+  content: string
+): Promise<void> {
+  const bytes = new TextEncoder().encode(content);
+  const gz = await gzipCompress(bytes);
+  const [contentSha, gzSha] = await Promise.all([sha256(bytes), sha256(gz)]);
+  await Promise.all([
+    cache.setPackagesBlob(owner, repo, variant, contentSha, bytes, 'text/plain'),
+    cache.setPackagesBlob(owner, repo, variant, gzSha, gz, 'application/gzip'),
+  ]);
+}
+
+/**
+ * Generate and cache all APT repository metadata.
+ *
+ * Builds Packages content for every arch and writes the content-addressed
+ * `packages-blob/.../{sha256}` entries BEFORE writing the
+ * Release/InRelease/Release.gpg files that pin those SHA256s. Mirrors the
+ * RPM `cacheRpmSnapshot` pattern: any client that ends up reading the
+ * cached Release can resolve every reference — whether the client fetches
+ * by-hash or uses the legacy `binary-{arch}/Packages[.gz]` URL (which does
+ * the same blob lookup server-side) — against the exact bytes Release
+ * hashed over, eliminating the "Hash Sum mismatch" race.
  */
 async function generateAndCacheAll(
   route: RouteInfo,
@@ -794,7 +871,7 @@ async function generateAndCacheAll(
   const architectures = getArchitecturesFromAssets(debAssets);
   const packagesContentByArch = new Map<string, string>();
 
-  // Generate and cache Packages content for all architectures in parallel
+  // Generate Packages content for all architectures in parallel
   const archResults = await Promise.all(
     architectures.map(async (arch) => {
       const archAssets = filterByArchitecture(debAssets, arch);
@@ -812,25 +889,29 @@ async function generateAndCacheAll(
     })
   );
 
-  // Populate map and cache results
+  // Write content-addressed blobs BEFORE Release bytes are persisted. Blob
+  // writes are awaited so a subsequent read of the cached Release always
+  // resolves its references.
   await Promise.all(
     archResults
       .filter((result): result is { arch: string; content: string } => result !== null)
       .map(async ({ arch, content }) => {
         packagesContentByArch.set(arch, content);
-        await cache.setPackagesFile(owner, repo, arch, releaseVariant, content);
+        await writeAptPackagesBlobs(cache, owner, repo, releaseVariant, content);
       })
   );
 
   const config = {
     ...defaultReleaseConfig(owner, repo),
     architectures: architectures,
-    date: new Date(releases[0].published_at!), // Most recent release (non-null: drafts filtered)
+    date: mostRecentReleaseDate(releases),
   };
 
   const entries = await buildReleaseEntries(packagesContentByArch, component);
   const releaseContent = generateReleaseFile(config, entries);
 
+  // Only now swap in the Release/InRelease/Release.gpg that reference the
+  // already-written blob hashes.
   await cache.setReleaseFile(owner, repo, releaseVariant, releaseContent);
   await cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseHash);
 
@@ -845,7 +926,13 @@ async function generateAndCacheAll(
 }
 
 /**
- * Handle Packages file request for a specific architecture
+ * Handle Packages file request for a specific architecture.
+ *
+ * Served by looking up the current Release's SHA256 for this arch and
+ * fetching the content-addressed blob. No separate mutable cache key is
+ * written; this inherits the immutability of the blob cache (a concurrent
+ * refresh producing a new Release with new blobs cannot corrupt an
+ * in-flight client response).
  */
 async function handlePackages(
   route: RouteInfo,
@@ -854,18 +941,12 @@ async function handlePackages(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const content = await getPackagesContent(route, github, cache, env, ctx);
-
-  return new Response(content, {
-    headers: {
-      'Content-Type': 'text/plain',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
+  return servePackagesFromBlob(route, github, cache, env, ctx, false);
 }
 
 /**
- * Handle compressed Packages.gz request
+ * Handle compressed Packages.gz request — same blob-lookup flow as
+ * `handlePackages`, but pulls the pre-gzipped blob.
  */
 async function handlePackagesGz(
   route: RouteInfo,
@@ -874,125 +955,157 @@ async function handlePackagesGz(
   env: Env,
   ctx: ExecutionContext
 ): Promise<Response> {
-  const content = await getPackagesContent(route, github, cache, env, ctx);
-  const compressed = await gzipCompress(content);
-
-  return new Response(compressed, {
-    headers: {
-      'Content-Type': 'application/gzip',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
+  return servePackagesFromBlob(route, github, cache, env, ctx, true);
 }
 
 /**
- * Handle by-hash request - serves files by their SHA256/SHA512 hash
- * This allows APT to fetch consistent content during repository updates
+ * Handle by-hash request — pure lookup against the content-addressed
+ * `packages-blob/...` keyspace. Blobs are written before the (In)Release
+ * that pins their SHA256 is written (see `generateAndCacheAll` and
+ * `generateReleaseContent`), so a client that read any Release variant is
+ * guaranteed to find the exact bytes referenced — even if a background
+ * refresh has since produced a newer Release pinning different hashes.
+ *
+ * Returns 404 for unsupported hash types and for hashes that have aged out
+ * of the blob cache (24h default TTL). No regeneration — we never fabricate
+ * content for a hash that isn't in cache, since that would defeat the whole
+ * point of content-addressing.
  */
 async function handleByHash(
   route: RouteInfo,
-  github: GitHubClient,
+  _github: GitHubClient,
   cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
+  _env: Env,
+  _ctx: ExecutionContext
 ): Promise<Response> {
-  const { hashType, hash } = route;
+  const { owner, repo, releaseVariant, hashType, hash } = route;
 
   if (!hashType || !hash) {
     return new Response('Invalid by-hash request', { status: 400 });
   }
 
-  // We support SHA256 hashes
   if (hashType !== 'SHA256') {
     return new Response(`Unsupported hash type: ${hashType}`, { status: 404 });
   }
 
-  // Generate both Packages and Packages.gz content
-  const packagesContent = await getPackagesContent(route, github, cache, env, ctx);
-  const packagesGz = await gzipCompress(packagesContent);
-
-  // Calculate hashes for both formats
-  const packagesHash = await sha256(packagesContent);
-  const packagesGzHash = await sha256(packagesGz);
-
-  // Check if the requested hash matches either file
-  if (hash === packagesHash) {
-    return new Response(packagesContent, {
-      headers: {
-        'Content-Type': 'text/plain',
-        'Cache-Control': 'public, max-age=86400', // Longer cache for by-hash (immutable content)
-      },
-    });
+  const cached = await cache.getPackagesBlob(owner, repo, releaseVariant, hash);
+  if (!cached) {
+    return new Response(`Hash not found: ${hash}`, { status: 404 });
   }
 
-  if (hash === packagesGzHash) {
-    return new Response(packagesGz, {
-      headers: {
-        'Content-Type': 'application/gzip',
-        'Cache-Control': 'public, max-age=86400', // Longer cache for by-hash (immutable content)
-      },
-    });
-  }
-
-  // Hash not found - might be an old version
-  return new Response(`Hash not found: ${hash}`, { status: 404 });
+  return new Response(cached.body, {
+    headers: {
+      'Content-Type': cached.headers.get('Content-Type') || 'application/octet-stream',
+      'Cache-Control': 'public, max-age=86400', // content-addressed = immutable
+    },
+  });
 }
 
 /**
- * Get or generate Packages file content for a specific architecture
+ * Parse a Release file's `SHA256:` section and return a map from path
+ * (e.g. `main/binary-amd64/Packages`) to its SHA256 hex digest. Ignores
+ * lines that don't match the expected `{32}sp {sha256} sp {size} sp {path}`
+ * shape.
  */
-async function getPackagesContent(
+function parseReleaseSha256Map(releaseContent: string): Map<string, string> {
+  const lines = releaseContent.split('\n');
+  const map = new Map<string, string>();
+  let inSha256 = false;
+  for (const line of lines) {
+    if (/^SHA256:\s*$/.test(line)) { inSha256 = true; continue; }
+    if (inSha256) {
+      // Section continues until a non-indented line.
+      if (!line.startsWith(' ')) { inSha256 = false; continue; }
+      const match = line.trim().match(/^([0-9a-f]{64})\s+\d+\s+(\S.*)$/);
+      if (match) map.set(match[2], match[1]);
+    }
+  }
+  return map;
+}
+
+/**
+ * Look up the SHA256 in a cached Release for a specific binary path under
+ * the given component/architecture, e.g. `main/binary-amd64/Packages.gz`.
+ */
+function findPackagesSha(releaseContent: string, component: string, arch: string, gz: boolean): string | null {
+  const suffix = gz ? '.gz' : '';
+  const path = `${component}/binary-${arch}/Packages${suffix}`;
+  return parseReleaseSha256Map(releaseContent).get(path) ?? null;
+}
+
+/**
+ * Serve `binary-{arch}/Packages[.gz]` by looking up the SHA256 in the
+ * current Release, then fetching the content-addressed blob. If the
+ * Release isn't cached yet (cold start), generate it first — the
+ * generator writes blobs before returning.
+ *
+ * Returns an empty body (not 404) when the repo has no releases or no
+ * matching packages for the arch; apt clients follow up on Release, so a
+ * 404 at this layer would mask useful Release-level errors.
+ */
+async function servePackagesFromBlob(
   route: RouteInfo,
   github: GitHubClient,
   cache: CacheManager,
   env: Env,
-  ctx: ExecutionContext
-): Promise<string> {
-  const { owner, repo, architecture, releaseVariant } = route;
+  ctx: ExecutionContext,
+  gz: boolean
+): Promise<Response> {
+  const { owner, repo, component, architecture, releaseVariant } = route;
+  const contentType = gz ? 'application/gzip' : 'text/plain';
+  const emptyBody: BodyInit = gz ? await gzipCompress('') : '';
+  const emptyHeaders = { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=300' };
 
-  // Check cache first
-  const cachedHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
-  if (cachedHash) {
-    const cached = await cache.getPackagesFile(owner, repo, architecture, releaseVariant);
-    if (cached) {
-      // Validate in background
-      ctx.waitUntil(validateAndRefreshCache(route, github, cache, env, ctx));
-      return cached;
+  // Cached Release → parse → blob lookup. Kick off a background validation
+  // so the next request sees fresh data.
+  let releaseContent = await cache.getReleaseFile(owner, repo, releaseVariant);
+  let refreshed = false;
+
+  if (!releaseContent) {
+    // Cold cache: generate Release (which also writes blobs) and cache it.
+    try {
+      releaseContent = await generateReleaseContent(route, github, cache, env, ctx);
+      ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseVariant, releaseContent));
+      refreshed = true;
+    } catch {
+      return new Response(emptyBody, { headers: emptyHeaders });
     }
   }
 
-  // Generate fresh packages content
-  const includePrerelease = releaseVariant === 'prerelease';
-  const releases = await github.getAllReleases(owner, repo, includePrerelease);
+  const findAndFetch = async (): Promise<Response | null> => {
+    const sha = findPackagesSha(releaseContent!, component, architecture, gz);
+    if (!sha) return null;
+    const blob = await cache.getPackagesBlob(owner, repo, releaseVariant, sha);
+    if (!blob) return null;
+    return new Response(blob.body, {
+      headers: {
+        'Content-Type': blob.headers.get('Content-Type') || contentType,
+        'Cache-Control': 'public, max-age=300',
+      },
+    });
+  };
 
-  if (releases.length === 0) {
-    return ''; // No packages available
+  let response = await findAndFetch();
+
+  if (!response && !refreshed) {
+    // Release is stale/points at evicted blobs. Regenerate once.
+    try {
+      releaseContent = await generateReleaseContent(route, github, cache, env, ctx);
+      ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseVariant, releaseContent));
+      refreshed = true;
+      response = await findAndFetch();
+    } catch {
+      return new Response(emptyBody, { headers: emptyHeaders });
+    }
   }
 
-  // Aggregate assets from all releases
-  const allAssets = aggregateAssets(releases);
-  const debAssets = filterDebAssets(allAssets);
-  const archAssets = filterByArchitecture(debAssets, architecture);
+  if (response) {
+    if (!refreshed) ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
+    return response;
+  }
 
-  const packages = await generatePackagesContentMultiRelease(
-    owner,
-    repo,
-    archAssets,
-    env.GITHUB_TOKEN
-  );
-
-  const content = generatePackagesFile(packages);
-
-  // Cache in background (compute hash first, then cache in parallel)
-  const releaseIdsHash = await computeReleaseIdsHash(releases);
-  ctx.waitUntil(
-    Promise.all([
-      cache.setPackagesFile(owner, repo, architecture, releaseVariant, content),
-      cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseIdsHash),
-    ])
-  );
-
-  return content;
+  // Release has no entry for this arch (no packages on this arch).
+  return new Response(emptyBody, { headers: emptyHeaders });
 }
 
 /**
@@ -1001,7 +1114,7 @@ async function getPackagesContent(
 async function generatePackagesContentMultiRelease(
   owner: string,
   repo: string,
-  assets: AggregatedAsset[],
+  assets: GitHubAsset[],
   githubToken?: string
 ): Promise<PackageEntry[]> {
   // Build package entries with concurrency limiting to avoid subrequest limits
@@ -1010,7 +1123,7 @@ async function generatePackagesContentMultiRelease(
     assets,
     async (asset) => {
       try {
-        return await buildPackageEntry(asset, owner, repo, asset.releaseTagName, githubToken);
+        return await buildPackageEntry(asset, githubToken);
       } catch (error) {
         console.error(`Failed to process ${asset.name}:`, error);
         return null;
@@ -1046,11 +1159,7 @@ async function isPubliclyAccessible(url: string): Promise<boolean> {
  */
 async function proxyGitHubDownload(url: string, token: string): Promise<Response> {
   const response = await fetch(url, {
-    headers: {
-      'Authorization': `token ${token}`,
-      'Accept': 'application/octet-stream',
-      'User-Agent': 'Reprox/1.0',
-    },
+    headers: githubHeaders(token, 'octet-stream'),
     redirect: 'follow',
   });
 
@@ -1154,9 +1263,168 @@ async function handleBinaryRedirect(
 // RPM Repository Handlers
 // =============================================================================
 
+type RpmXmlKind = 'primary' | 'filelists' | 'other';
+
 /**
- * Get or generate repomd.xml and its signature together
- * This ensures both are consistent (signature matches content)
+ * A fully-built RPM metadata snapshot: the repomd.xml plus every blob it
+ * references, content-addressed by SHA256. Everything in here is internally
+ * consistent — repomd.xml's checksums match the blob bodies exactly.
+ */
+interface RpmSnapshot {
+  repomdXml: string;
+  signature: string | null;
+  releaseIdsHash: string;
+  // Map from sha256 -> { body, contentType } for all six files:
+  //   {primaryXml, primaryGz, filelistsXml, filelistsGz, otherXml, otherGz}
+  blobs: Map<string, { body: Uint8Array; contentType: string }>;
+  hashes: RepomdHashes;
+}
+
+/**
+ * Build RPM package entries from assets
+ */
+async function buildRpmPackages(
+  assets: GitHubAsset[],
+  githubToken?: string
+): Promise<RpmPackageEntry[]> {
+  const rpmAssets = filterRpmAssets(assets);
+
+  // Build RPM entries with concurrency limiting to avoid subrequest limits
+  // (Cloudflare Workers limits: 50 free tier, 1000 paid tier)
+  return mapWithConcurrencyFiltered(
+    rpmAssets,
+    async (asset) => {
+      try {
+        return await buildRpmPackageEntry(asset, githubToken);
+      } catch (error) {
+        console.error(`Failed to process ${asset.name}:`, error);
+        return null;
+      }
+    },
+    30
+  );
+}
+
+/**
+ * Build a complete, internally-consistent RPM metadata snapshot from scratch.
+ * Hits GitHub for releases and parses RPM headers. Does not touch the cache.
+ */
+async function buildRpmSnapshot(
+  route: RouteInfo,
+  github: GitHubClient,
+  env: Env
+): Promise<RpmSnapshot | null> {
+  const { owner, repo, releaseVariant } = route;
+  const includePrerelease = releaseVariant === 'prerelease';
+  const releases = await github.getAllReleases(owner, repo, includePrerelease);
+
+  if (releases.length === 0) return null;
+
+  const releaseIdsHash = await computeReleaseIdsHash(releases);
+  const allAssets = aggregateAssets(releases);
+  const packages = await buildRpmPackages(allAssets, env.GITHUB_TOKEN);
+
+  const primaryXml = generatePrimaryXml(packages);
+  const filelistsXml = generateFilelistsXml(packages);
+  const otherXml = generateOtherXml(packages);
+
+  const [primaryGz, filelistsGz, otherGz] = await Promise.all([
+    gzipCompress(primaryXml),
+    gzipCompress(filelistsXml),
+    gzipCompress(otherXml),
+  ]);
+
+  // Fall back to current time if every release happens to have a null
+  // published_at (possible if all were demoted to drafts between pages).
+  const timestamp = mostRecentReleaseTimestamp(releases);
+
+  const { xml: repomdXml, hashes } = await buildRepomd({
+    primary: { xml: primaryXml, gz: primaryGz },
+    filelists: { xml: filelistsXml, gz: filelistsGz },
+    other: { xml: otherXml, gz: otherGz },
+    timestamp,
+  });
+
+  const signature = env.GPG_PRIVATE_KEY
+    ? await signDetachedBinary(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE)
+    : null;
+
+  const textBytes = (s: string) => new TextEncoder().encode(s);
+  const blobs = new Map<string, { body: Uint8Array; contentType: string }>();
+  blobs.set(hashes.primary.xml,   { body: textBytes(primaryXml),   contentType: 'application/xml' });
+  blobs.set(hashes.primary.gz,    { body: primaryGz,               contentType: 'application/gzip' });
+  blobs.set(hashes.filelists.xml, { body: textBytes(filelistsXml), contentType: 'application/xml' });
+  blobs.set(hashes.filelists.gz,  { body: filelistsGz,             contentType: 'application/gzip' });
+  blobs.set(hashes.other.xml,     { body: textBytes(otherXml),     contentType: 'application/xml' });
+  blobs.set(hashes.other.gz,      { body: otherGz,                 contentType: 'application/gzip' });
+
+  return { repomdXml, signature, releaseIdsHash, blobs, hashes };
+}
+
+/**
+ * Persist a snapshot to cache. Writes blobs before repomd.xml so any client
+ * that subsequently reads the cached repomd.xml can resolve every hashed
+ * <location> path from the blob cache.
+ */
+async function cacheRpmSnapshot(
+  route: RouteInfo,
+  cache: CacheManager,
+  snapshot: RpmSnapshot
+): Promise<void> {
+  const { owner, repo, releaseVariant } = route;
+
+  // Write all blobs first. They are content-addressed and immutable.
+  await Promise.all(
+    Array.from(snapshot.blobs.entries()).map(([sha256, { body, contentType }]) =>
+      cache.setRpmBlob(owner, repo, releaseVariant, sha256, body, contentType)
+    )
+  );
+
+  // Then swap in the repomd.xml (and its signature) that references them.
+  const repomdWrites: Promise<void>[] = [
+    cache.setRpmRepomd(owner, repo, releaseVariant, snapshot.repomdXml),
+    cache.setReleaseIdsHash(owner, repo, releaseVariant, snapshot.releaseIdsHash),
+  ];
+  if (snapshot.signature) {
+    repomdWrites.push(cache.setRpmRepomdAsc(owner, repo, releaseVariant, snapshot.signature));
+  }
+  await Promise.all(repomdWrites);
+}
+
+/**
+ * Background task: if the release-ids-hash has changed, rebuild the snapshot
+ * and write it. Blob cache keys are content-addressed so this never
+ * invalidates in-flight references from clients holding the previous
+ * repomd.xml — they continue to resolve against the older immutable blobs
+ * (until the blob TTL expires, 24h by default).
+ */
+async function validateAndRefreshRpmSnapshot(
+  route: RouteInfo,
+  github: GitHubClient,
+  cache: CacheManager,
+  env: Env
+): Promise<void> {
+  try {
+    const { owner, repo, releaseVariant } = route;
+    const includePrerelease = releaseVariant === 'prerelease';
+    const releases = await github.getAllReleases(owner, repo, includePrerelease);
+    if (releases.length === 0) return;
+
+    const currentHash = await computeReleaseIdsHash(releases);
+    if (!(await cache.needsRefresh(owner, repo, releaseVariant, currentHash))) return;
+
+    const snapshot = await buildRpmSnapshot(route, github, env);
+    if (!snapshot) return;
+    await cacheRpmSnapshot(route, cache, snapshot);
+  } catch (error) {
+    console.error('Background RPM snapshot refresh failed:', error);
+  }
+}
+
+/**
+ * Get or generate the current repomd.xml + signature. Serves from cache
+ * when present and kicks off background validation; otherwise builds a
+ * fresh snapshot and caches it.
  */
 async function getRepomdWithSignature(
   route: RouteInfo,
@@ -1167,109 +1435,34 @@ async function getRepomdWithSignature(
 ): Promise<{ repomd: string; signature: string | null }> {
   const { owner, repo, releaseVariant } = route;
 
-  // Check cache first
   const [cachedRepomd, cachedSignature] = await Promise.all([
     cache.getRpmRepomd(owner, repo, releaseVariant),
     cache.getRpmRepomdAsc(owner, repo, releaseVariant),
   ]);
 
-  // If we have cached content (and signature if GPG is configured), use it
   if (cachedRepomd && (cachedSignature || !env.GPG_PRIVATE_KEY)) {
-    // Validate cache in background
-    ctx.waitUntil(validateAndRefreshRepomd(route, github, cache, env, ctx));
+    ctx.waitUntil(validateAndRefreshRpmSnapshot(route, github, cache, env));
     return { repomd: cachedRepomd, signature: cachedSignature };
   }
 
-  // Generate fresh content
-  const files = await getRpmMetadataFiles(route, github, cache, env, ctx);
-  const repomdXml = await generateRepomdXml(files);
-
-  // Sign if GPG key is available
-  let signature: string | null = null;
-  if (env.GPG_PRIVATE_KEY) {
-    signature = await signDetachedBinary(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
+  const snapshot = await buildRpmSnapshot(route, github, env);
+  if (!snapshot) {
+    // No releases — return an empty repomd.xml so DNF doesn't error out.
+    const empty = await buildRepomd({
+      primary:   { xml: generatePrimaryXml([]),   gz: await gzipCompress(generatePrimaryXml([])) },
+      filelists: { xml: generateFilelistsXml([]), gz: await gzipCompress(generateFilelistsXml([])) },
+      other:     { xml: generateOtherXml([]),     gz: await gzipCompress(generateOtherXml([])) },
+      timestamp: Math.floor(Date.now() / 1000),
+    });
+    return { repomd: empty.xml, signature: null };
   }
 
-  // Cache both together in background
-  ctx.waitUntil(
-    Promise.all([
-      cache.setRpmRepomd(owner, repo, releaseVariant, repomdXml),
-      signature ? cache.setRpmRepomdAsc(owner, repo, releaseVariant, signature) : Promise.resolve(),
-    ])
-  );
-
-  return { repomd: repomdXml, signature };
+  ctx.waitUntil(cacheRpmSnapshot(route, cache, snapshot));
+  return { repomd: snapshot.repomdXml, signature: snapshot.signature };
 }
 
 /**
- * Background task to validate and refresh repomd cache if needed.
- * IMPORTANT: When refresh is needed, we regenerate XML files fresh from GitHub
- * (not from cache) to ensure checksums in repomd.xml match the actual content.
- */
-async function validateAndRefreshRepomd(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<void> {
-  try {
-    const { owner, repo, releaseVariant } = route;
-    const includePrerelease = releaseVariant === 'prerelease';
-    const releases = await github.getAllReleases(owner, repo, includePrerelease);
-
-    if (releases.length === 0) return;
-
-    const currentHash = await computeReleaseIdsHash(releases);
-    const needsRefresh = await cache.needsRefresh(owner, repo, releaseVariant, currentHash);
-
-    if (needsRefresh) {
-      // Regenerate XML files fresh from GitHub releases (bypass cache to ensure consistency)
-      const allAssets = aggregateAssets(releases);
-      const packages = await buildRpmPackages(allAssets, env.GITHUB_TOKEN);
-      const metadata = generateRpmXmlMetadata(packages);
-      const timestamp = Math.floor(new Date(releases[0].published_at!).getTime() / 1000);
-
-      // Compress XML files for repomd.xml checksum calculation
-      const [primaryGz, filelistsGz, otherGz] = await Promise.all([
-        gzipCompress(metadata.primaryXml),
-        gzipCompress(metadata.filelistsXml),
-        gzipCompress(metadata.otherXml),
-      ]);
-
-      // Generate repomd.xml with correct checksums
-      const repomdFiles: RepomdFileInfo = {
-        primary: { xml: metadata.primaryXml, gz: primaryGz },
-        filelists: { xml: metadata.filelistsXml, gz: filelistsGz },
-        other: { xml: metadata.otherXml, gz: otherGz },
-        timestamp,
-      };
-      const repomdXml = await generateRepomdXml(repomdFiles);
-
-      // Cache everything atomically - XML files, repomd.xml, and signature
-      const cachePromises: Promise<void>[] = [
-        cache.setRpmPrimaryXml(owner, repo, releaseVariant, metadata.primaryXml),
-        cache.setRpmFilelistsXml(owner, repo, releaseVariant, metadata.filelistsXml),
-        cache.setRpmOtherXml(owner, repo, releaseVariant, metadata.otherXml),
-        cache.setRpmTimestamp(owner, repo, releaseVariant, timestamp),
-        cache.setRpmRepomd(owner, repo, releaseVariant, repomdXml),
-        cache.setReleaseIdsHash(owner, repo, releaseVariant, currentHash),
-      ];
-
-      if (env.GPG_PRIVATE_KEY) {
-        const signature = await signDetachedBinary(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
-        cachePromises.push(cache.setRpmRepomdAsc(owner, repo, releaseVariant, signature));
-      }
-
-      await Promise.all(cachePromises);
-    }
-  } catch (error) {
-    console.error('Background repomd cache validation failed:', error);
-  }
-}
-
-/**
- * Handle repomd.xml request - RPM repository metadata index
+ * Handle repomd.xml request
  */
 async function handleRepomd(
   route: RouteInfo,
@@ -1279,7 +1472,6 @@ async function handleRepomd(
   ctx: ExecutionContext
 ): Promise<Response> {
   const { repomd } = await getRepomdWithSignature(route, github, cache, env, ctx);
-
   return new Response(repomd, {
     headers: {
       'Content-Type': 'application/xml',
@@ -1289,7 +1481,7 @@ async function handleRepomd(
 }
 
 /**
- * Handle repomd.xml.asc request - GPG signature for repomd.xml
+ * Handle repomd.xml.asc request
  */
 async function handleRepomdAsc(
   route: RouteInfo,
@@ -1303,7 +1495,6 @@ async function handleRepomdAsc(
   }
 
   const { signature } = await getRepomdWithSignature(route, github, cache, env, ctx);
-
   if (!signature) {
     return new Response('Signature generation failed', { status: 500 });
   }
@@ -1317,85 +1508,14 @@ async function handleRepomdAsc(
 }
 
 /**
- * Helper to create RPM XML response (with optional gzip compression)
- */
-async function createRpmXmlResponse(
-  content: string,
-  compressed: boolean
-): Promise<Response> {
-  if (compressed) {
-    const gzipped = await gzipCompress(content);
-    return new Response(gzipped, {
-      headers: {
-        'Content-Type': 'application/gzip',
-        'Cache-Control': 'public, max-age=300',
-      },
-    });
-  }
-
-  return new Response(content, {
-    headers: {
-      'Content-Type': 'application/xml',
-      'Cache-Control': 'public, max-age=300',
-    },
-  });
-}
-
-/**
- * Build RPM package entries from assets
- */
-async function buildRpmPackages(
-  assets: { name: string; size: number; browser_download_url: string }[],
-  githubToken?: string
-): Promise<RpmPackageEntry[]> {
-  const rpmAssets = filterRpmAssets(assets);
-
-  // Build RPM entries with concurrency limiting to avoid subrequest limits
-  return mapWithConcurrencyFiltered(
-    rpmAssets,
-    async (asset) => {
-      try {
-        return await buildRpmPackageEntry(asset, githubToken);
-      } catch (error) {
-        console.error(`Failed to process ${asset.name}:`, error);
-        return null;
-      }
-    },
-    30 // Conservative concurrency limit for both tiers
-  );
-}
-
-/**
- * RPM XML content (without timestamp)
- */
-interface RpmXmlContent {
-  primaryXml: string;
-  filelistsXml: string;
-  otherXml: string;
-}
-
-/**
- * Cached RPM metadata content (includes timestamp)
- */
-interface CachedRpmMetadata extends RpmXmlContent {
-  timestamp: number; // Unix timestamp from GitHub release
-}
-
-/**
- * Generate all RPM XML metadata from packages
- */
-function generateRpmXmlMetadata(packages: RpmPackageEntry[]): RpmXmlContent {
-  return {
-    primaryXml: generatePrimaryXml(packages),
-    filelistsXml: generateFilelistsXml(packages),
-    otherXml: generateOtherXml(packages),
-  };
-}
-
-type RpmXmlType = 'primary' | 'filelists' | 'other';
-
-/**
- * Handle RPM XML metadata requests (primary.xml, filelists.xml, other.xml)
+ * Handle RPM XML metadata requests.
+ *
+ * - Hashed paths (`{sha256}-primary.xml.gz` etc.): look up blob by hash.
+ *   On miss, rebuild current snapshot; if the hash matches a current blob,
+ *   serve and cache it. Otherwise 404.
+ * - Unhashed paths: regenerate current state and serve on the fly.
+ *   These are only hit by legacy clients or direct-URL debugging; current
+ *   repomd.xml always emits hashed paths.
  */
 async function handleRpmXml(
   route: RouteInfo,
@@ -1403,180 +1523,65 @@ async function handleRpmXml(
   cache: CacheManager,
   env: Env,
   ctx: ExecutionContext,
-  xmlType: RpmXmlType,
+  xmlType: RpmXmlKind,
   compressed: boolean
 ): Promise<Response> {
-  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
-  const xmlContent = metadata[`${xmlType}Xml` as keyof RpmXmlContent];
-  return createRpmXmlResponse(xmlContent, compressed);
-}
+  const { owner, repo, releaseVariant, hash } = route;
+  const contentType = compressed ? 'application/gzip' : 'application/xml';
 
-/**
- * Get or generate RPM metadata with caching
- */
-async function getCachedRpmMetadata(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<CachedRpmMetadata> {
-  const { owner, repo, releaseVariant } = route;
-
-  // Check cache first
-  const cachedHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
-  if (cachedHash) {
-    const [cachedPrimary, cachedFilelists, cachedOther, cachedTimestamp] = await Promise.all([
-      cache.getRpmPrimaryXml(owner, repo, releaseVariant),
-      cache.getRpmFilelistsXml(owner, repo, releaseVariant),
-      cache.getRpmOtherXml(owner, repo, releaseVariant),
-      cache.getRpmTimestamp(owner, repo, releaseVariant),
-    ]);
-
-    if (cachedPrimary && cachedFilelists && cachedOther && cachedTimestamp) {
-      // Validate in background
-      ctx.waitUntil(validateAndRefreshRpmCache(route, github, cache, env, ctx));
-
-      return {
-        primaryXml: cachedPrimary,
-        filelistsXml: cachedFilelists,
-        otherXml: cachedOther,
-        timestamp: cachedTimestamp,
-      };
+  if (hash) {
+    const cached = await cache.getRpmBlob(owner, repo, releaseVariant, hash);
+    if (cached) {
+      return new Response(cached.body, {
+        headers: {
+          'Content-Type': cached.headers.get('Content-Type') || contentType,
+          'Cache-Control': 'public, max-age=86400', // content-addressed = immutable
+        },
+      });
     }
+
+    // Cache miss. Rebuild and serve only if the requested hash matches a
+    // current blob — this prevents serving bogus content for an old hash.
+    const snapshot = await buildRpmSnapshot(route, github, env);
+    if (snapshot) {
+      const blob = snapshot.blobs.get(hash);
+      if (blob) {
+        ctx.waitUntil(cacheRpmSnapshot(route, cache, snapshot));
+        return new Response(blob.body, {
+          headers: {
+            'Content-Type': blob.contentType,
+            'Cache-Control': 'public, max-age=86400',
+          },
+        });
+      }
+    }
+
+    return new Response(`Metadata file not found: ${hash}`, { status: 404 });
   }
 
-  // No cache - generate fresh content
-  const includePrerelease = releaseVariant === 'prerelease';
-  const releases = await github.getAllReleases(owner, repo, includePrerelease);
-
-  if (releases.length === 0) {
-    // Return empty metadata if no releases
-    return {
-      primaryXml: generatePrimaryXml([]),
-      filelistsXml: generateFilelistsXml([]),
-      otherXml: generateOtherXml([]),
-      timestamp: Math.floor(Date.now() / 1000),
-    };
-  }
-
-  // Aggregate assets from all releases
-  const allAssets = aggregateAssets(releases);
-  const packages = await buildRpmPackages(allAssets, env.GITHUB_TOKEN);
-  const metadata = generateRpmXmlMetadata(packages);
-
-  // Use most recent release's timestamp (non-null assertion safe: drafts filtered out)
-  const timestamp = Math.floor(new Date(releases[0].published_at!).getTime() / 1000);
-  const releaseIdsHash = await computeReleaseIdsHash(releases);
-
-  // Cache in background (including asset URLs for efficient binary redirects)
-  ctx.waitUntil(
-    Promise.all([
-      cache.setRpmPrimaryXml(owner, repo, releaseVariant, metadata.primaryXml),
-      cache.setRpmFilelistsXml(owner, repo, releaseVariant, metadata.filelistsXml),
-      cache.setRpmOtherXml(owner, repo, releaseVariant, metadata.otherXml),
-      cache.setRpmTimestamp(owner, repo, releaseVariant, timestamp),
-      cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseIdsHash),
-      cache.setAssetUrls(owner, repo, releaseVariant, releaseIdsHash, allAssets),
-    ])
+  // Unhashed legacy path: regenerate on the fly.
+  const snapshot = await buildRpmSnapshot(route, github, env);
+  const emptyBody = (): Uint8Array => new TextEncoder().encode(
+    xmlType === 'primary' ? generatePrimaryXml([]) :
+    xmlType === 'filelists' ? generateFilelistsXml([]) :
+    generateOtherXml([])
   );
 
-  return { ...metadata, timestamp };
-}
-
-/**
- * Background task to validate and refresh RPM cache if needed.
- * IMPORTANT: When XML files change, we MUST also regenerate repomd.xml
- * to ensure checksums stay consistent. Otherwise DNF will see mismatched
- * checksums between repomd.xml and the actual XML files.
- */
-async function validateAndRefreshRpmCache(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<void> {
-  try {
-    const { owner, repo, releaseVariant } = route;
-    const includePrerelease = releaseVariant === 'prerelease';
-    const releases = await github.getAllReleases(owner, repo, includePrerelease);
-
-    if (releases.length === 0) return;
-
-    const currentHash = await computeReleaseIdsHash(releases);
-    const needsRefresh = await cache.needsRefresh(owner, repo, releaseVariant, currentHash);
-
-    if (needsRefresh) {
-      // Aggregate assets from all releases
-      const allAssets = aggregateAssets(releases);
-      const packages = await buildRpmPackages(allAssets, env.GITHUB_TOKEN);
-      const metadata = generateRpmXmlMetadata(packages);
-      // Non-null assertion safe: drafts are filtered out in getAllReleases
-      const timestamp = Math.floor(new Date(releases[0].published_at!).getTime() / 1000);
-
-      // Compress XML files for repomd.xml checksum calculation
-      const [primaryGz, filelistsGz, otherGz] = await Promise.all([
-        gzipCompress(metadata.primaryXml),
-        gzipCompress(metadata.filelistsXml),
-        gzipCompress(metadata.otherXml),
-      ]);
-
-      // Generate repomd.xml with correct checksums for the new XML files
-      const repomdFiles: RepomdFileInfo = {
-        primary: { xml: metadata.primaryXml, gz: primaryGz },
-        filelists: { xml: metadata.filelistsXml, gz: filelistsGz },
-        other: { xml: metadata.otherXml, gz: otherGz },
-        timestamp,
-      };
-      const repomdXml = await generateRepomdXml(repomdFiles);
-
-      // Cache everything atomically - XML files, repomd.xml, and signature
-      const cachePromises: Promise<void>[] = [
-        cache.setRpmPrimaryXml(owner, repo, releaseVariant, metadata.primaryXml),
-        cache.setRpmFilelistsXml(owner, repo, releaseVariant, metadata.filelistsXml),
-        cache.setRpmOtherXml(owner, repo, releaseVariant, metadata.otherXml),
-        cache.setRpmTimestamp(owner, repo, releaseVariant, timestamp),
-        cache.setReleaseIdsHash(owner, repo, releaseVariant, currentHash),
-        cache.setRpmRepomd(owner, repo, releaseVariant, repomdXml),
-      ];
-
-      // Also regenerate signature if GPG is configured
-      if (env.GPG_PRIVATE_KEY) {
-        const signature = await signDetachedBinary(repomdXml, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
-        cachePromises.push(cache.setRpmRepomdAsc(owner, repo, releaseVariant, signature));
-      }
-
-      await Promise.all(cachePromises);
-    }
-  } catch (error) {
-    console.error('Background RPM cache validation failed:', error);
+  if (!snapshot) {
+    const body = compressed ? await gzipCompress(emptyBody()) : emptyBody();
+    return new Response(body, {
+      headers: { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=300' },
+    });
   }
-}
 
-/**
- * Get all RPM metadata files for repomd.xml generation
- */
-async function getRpmMetadataFiles(
-  route: RouteInfo,
-  github: GitHubClient,
-  cache: CacheManager,
-  env: Env,
-  ctx: ExecutionContext
-): Promise<RepomdFileInfo> {
-  const metadata = await getCachedRpmMetadata(route, github, cache, env, ctx);
+  const selectedHash = compressed
+    ? snapshot.hashes[xmlType].gz
+    : snapshot.hashes[xmlType].xml;
+  const blob = snapshot.blobs.get(selectedHash);
 
-  // Compress all files
-  const [primaryGz, filelistsGz, otherGz] = await Promise.all([
-    gzipCompress(metadata.primaryXml),
-    gzipCompress(metadata.filelistsXml),
-    gzipCompress(metadata.otherXml),
-  ]);
+  ctx.waitUntil(cacheRpmSnapshot(route, cache, snapshot));
 
-  return {
-    primary: { xml: metadata.primaryXml, gz: primaryGz },
-    filelists: { xml: metadata.filelistsXml, gz: filelistsGz },
-    other: { xml: metadata.otherXml, gz: otherGz },
-    timestamp: metadata.timestamp,
-  };
+  return new Response(blob!.body, {
+    headers: { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=300' },
+  });
 }

@@ -1,13 +1,14 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
-  generateRepomdXml,
+  buildRepomd,
   generatePrimaryXml,
   generateFilelistsXml,
   generateOtherXml,
   filterRpmAssets,
+  buildRpmPackageEntry,
   type RepomdFileInfo,
 } from '../../src/generators/repodata';
-import type { RpmPackageEntry, RpmHeaderData, AssetLike } from '../../src/types';
+import type { RpmPackageEntry, RpmHeaderData, GitHubAsset } from '../../src/types';
 import { gzipCompress } from '../../src/utils/crypto';
 
 // ============================================================================
@@ -84,79 +85,101 @@ async function createRepomdFileInfo(): Promise<RepomdFileInfo> {
 }
 
 // ============================================================================
-// generateRepomdXml Tests
+// buildRepomd Tests
 // ============================================================================
 
-describe('generateRepomdXml', () => {
+describe('buildRepomd', () => {
   it('generates valid XML structure', async () => {
     const files = await createRepomdFileInfo();
-    const output = await generateRepomdXml(files);
+    const { xml } = await buildRepomd(files);
 
-    expect(output).toContain('<?xml version="1.0" encoding="UTF-8"?>');
-    expect(output).toContain('<repomd xmlns="http://linux.duke.edu/metadata/repo"');
-    expect(output).toContain('</repomd>');
+    expect(xml).toContain('<?xml version="1.0" encoding="UTF-8"?>');
+    expect(xml).toContain('<repomd xmlns="http://linux.duke.edu/metadata/repo"');
+    expect(xml).toContain('</repomd>');
   });
 
   it('includes revision timestamp', async () => {
     const files = await createRepomdFileInfo();
-    const output = await generateRepomdXml(files);
+    const { xml } = await buildRepomd(files);
 
-    expect(output).toMatch(/<revision>\d+<\/revision>/);
+    expect(xml).toMatch(/<revision>\d+<\/revision>/);
   });
 
-  it('includes primary data section', async () => {
+  it('includes primary data section with hash-prefixed location', async () => {
     const files = await createRepomdFileInfo();
-    const output = await generateRepomdXml(files);
+    const { xml } = await buildRepomd(files);
 
-    expect(output).toContain('<data type="primary">');
-    expect(output).toContain('<location href="repodata/primary.xml.gz"/>');
-    expect(output).toContain('<checksum type="sha256">');
-    expect(output).toContain('<open-checksum type="sha256">');
+    expect(xml).toContain('<data type="primary">');
+    expect(xml).toMatch(/<location href="repodata\/[0-9a-f]{64}-primary\.xml\.gz"\/>/);
+    expect(xml).toContain('<checksum type="sha256">');
+    expect(xml).toContain('<open-checksum type="sha256">');
   });
 
-  it('includes filelists data section', async () => {
+  it('includes filelists data section with hash-prefixed location', async () => {
     const files = await createRepomdFileInfo();
-    const output = await generateRepomdXml(files);
+    const { xml } = await buildRepomd(files);
 
-    expect(output).toContain('<data type="filelists">');
-    expect(output).toContain('<location href="repodata/filelists.xml.gz"/>');
+    expect(xml).toContain('<data type="filelists">');
+    expect(xml).toMatch(/<location href="repodata\/[0-9a-f]{64}-filelists\.xml\.gz"\/>/);
   });
 
-  it('includes other data section', async () => {
+  it('includes other data section with hash-prefixed location', async () => {
     const files = await createRepomdFileInfo();
-    const output = await generateRepomdXml(files);
+    const { xml } = await buildRepomd(files);
 
-    expect(output).toContain('<data type="other">');
-    expect(output).toContain('<location href="repodata/other.xml.gz"/>');
+    expect(xml).toContain('<data type="other">');
+    expect(xml).toMatch(/<location href="repodata\/[0-9a-f]{64}-other\.xml\.gz"\/>/);
+  });
+
+  it('location hash matches the compressed-file checksum', async () => {
+    // The SHA256 used in the <location> href is the same as the <checksum>
+    // for that section — this is what makes the file content-addressed.
+    const files = await createRepomdFileInfo();
+    const { xml } = await buildRepomd(files);
+
+    const primaryMatch = xml.match(
+      /<data type="primary">[\s\S]*?<checksum type="sha256">([0-9a-f]{64})<\/checksum>[\s\S]*?<location href="repodata\/([0-9a-f]{64})-primary\.xml\.gz"\/>/
+    );
+    expect(primaryMatch).not.toBeNull();
+    expect(primaryMatch![1]).toBe(primaryMatch![2]);
+  });
+
+  it('returns hashes matching the embedded <location> paths', async () => {
+    const files = await createRepomdFileInfo();
+    const { xml, hashes } = await buildRepomd(files);
+
+    expect(xml).toContain(`repodata/${hashes.primary.gz}-primary.xml.gz`);
+    expect(xml).toContain(`repodata/${hashes.filelists.gz}-filelists.xml.gz`);
+    expect(xml).toContain(`repodata/${hashes.other.gz}-other.xml.gz`);
   });
 
   it('includes size and open-size for each section', async () => {
     const files = await createRepomdFileInfo();
-    const output = await generateRepomdXml(files);
+    const { xml } = await buildRepomd(files);
 
     // Should have size tags for compressed files
-    expect(output).toMatch(/<size>\d+<\/size>/);
+    expect(xml).toMatch(/<size>\d+<\/size>/);
     // Should have open-size tags for uncompressed files
-    expect(output).toMatch(/<open-size>\d+<\/open-size>/);
+    expect(xml).toMatch(/<open-size>\d+<\/open-size>/);
   });
 
   it('calculates correct checksums', async () => {
     const files = await createRepomdFileInfo();
-    const output = await generateRepomdXml(files);
+    const { xml } = await buildRepomd(files);
 
     // Checksums should be 64 hex characters (SHA256)
-    const checksumMatches = output.match(/<checksum type="sha256">([0-9a-f]+)<\/checksum>/g);
+    const checksumMatches = xml.match(/<checksum type="sha256">([0-9a-f]+)<\/checksum>/g);
     expect(checksumMatches).toHaveLength(3);
 
-    const openChecksumMatches = output.match(/<open-checksum type="sha256">([0-9a-f]+)<\/open-checksum>/g);
+    const openChecksumMatches = xml.match(/<open-checksum type="sha256">([0-9a-f]+)<\/open-checksum>/g);
     expect(openChecksumMatches).toHaveLength(3);
   });
 
   it('includes timestamp for each section', async () => {
     const files = await createRepomdFileInfo();
-    const output = await generateRepomdXml(files);
+    const { xml } = await buildRepomd(files);
 
-    const timestampMatches = output.match(/<timestamp>\d+<\/timestamp>/g);
+    const timestampMatches = xml.match(/<timestamp>\d+<\/timestamp>/g);
     expect(timestampMatches).toHaveLength(3);
   });
 });
@@ -391,6 +414,59 @@ describe('generatePrimaryXml', () => {
     expect(output).toContain('<name>pkg2</name>');
     expect(output).toContain('<name>pkg3</name>');
   });
+
+  it('emits <file> entries inside <format> for primary-file paths', () => {
+    const packages = [createRpmPackageEntry({
+      headerData: createRpmHeaderData({
+        primaryFiles: ['/usr/bin/myapp', '/etc/myapp.conf'],
+      }),
+    })];
+    const output = generatePrimaryXml(packages);
+
+    expect(output).toContain('<file>/usr/bin/myapp</file>');
+    expect(output).toContain('<file>/etc/myapp.conf</file>');
+    // <file> must sit inside <format>
+    const formatBlock = output.match(/<format>[\s\S]*?<\/format>/)?.[0] ?? '';
+    expect(formatBlock).toContain('<file>/usr/bin/myapp</file>');
+  });
+
+  it('orders <file> entries before <rpm:provides>', () => {
+    const packages = [createRpmPackageEntry({
+      headerData: createRpmHeaderData({
+        primaryFiles: ['/usr/bin/myapp'],
+        provides: ['myapp'],
+        provideVersions: ['1.0'],
+        provideFlags: [0x08],
+      }),
+    })];
+    const output = generatePrimaryXml(packages);
+
+    const fileIdx = output.indexOf('<file>/usr/bin/myapp</file>');
+    const providesIdx = output.indexOf('<rpm:provides>');
+    expect(fileIdx).toBeGreaterThan(-1);
+    expect(providesIdx).toBeGreaterThan(-1);
+    expect(fileIdx).toBeLessThan(providesIdx);
+  });
+
+  it('escapes special characters in <file> paths', () => {
+    const packages = [createRpmPackageEntry({
+      headerData: createRpmHeaderData({
+        primaryFiles: ['/usr/bin/weird & name'],
+      }),
+    })];
+    const output = generatePrimaryXml(packages);
+
+    expect(output).toContain('<file>/usr/bin/weird &amp; name</file>');
+  });
+
+  it('omits <file> elements when primaryFiles is empty', () => {
+    const packages = [createRpmPackageEntry({
+      headerData: createRpmHeaderData({ primaryFiles: [] }),
+    })];
+    const output = generatePrimaryXml(packages);
+
+    expect(output).not.toContain('<file>');
+  });
 });
 
 // ============================================================================
@@ -556,11 +632,11 @@ describe('generateOtherXml', () => {
 
 describe('filterRpmAssets', () => {
   it('filters to only .rpm files with valid digest', () => {
-    const assets: AssetLike[] = [
-      { name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
-      { name: 'package-1.0.0.tar.gz', size: 2000, browser_download_url: 'url2', digest: 'sha256:def456' },
-      { name: 'package_1.0.0_amd64.deb', size: 3000, browser_download_url: 'url3', digest: 'sha256:ghi789' },
-      { name: 'package-1.0.0-1.aarch64.rpm', size: 4000, browser_download_url: 'url4', digest: 'sha256:jkl012' },
+    const assets: GitHubAsset[] = [
+      { id: 1, name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { id: 2, name: 'package-1.0.0.tar.gz', size: 2000, browser_download_url: 'url2', digest: 'sha256:def456' },
+      { id: 3, name: 'package_1.0.0_amd64.deb', size: 3000, browser_download_url: 'url3', digest: 'sha256:ghi789' },
+      { id: 4, name: 'package-1.0.0-1.aarch64.rpm', size: 4000, browser_download_url: 'url4', digest: 'sha256:jkl012' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -571,9 +647,9 @@ describe('filterRpmAssets', () => {
   });
 
   it('excludes source RPMs (.src.rpm)', () => {
-    const assets: AssetLike[] = [
-      { name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
-      { name: 'package-1.0.0-1.src.rpm', size: 5000, browser_download_url: 'url2', digest: 'sha256:def456' },
+    const assets: GitHubAsset[] = [
+      { id: 1, name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { id: 2, name: 'package-1.0.0-1.src.rpm', size: 5000, browser_download_url: 'url2', digest: 'sha256:def456' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -583,8 +659,8 @@ describe('filterRpmAssets', () => {
   });
 
   it('includes nosrc RPMs (only .src.rpm is excluded)', () => {
-    const assets: AssetLike[] = [
-      { name: 'package-1.0.0-1.nosrc.rpm', size: 6000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+    const assets: GitHubAsset[] = [
+      { id: 1, name: 'package-1.0.0-1.nosrc.rpm', size: 6000, browser_download_url: 'url1', digest: 'sha256:abc123' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -594,9 +670,9 @@ describe('filterRpmAssets', () => {
   });
 
   it('returns empty array when no .rpm files', () => {
-    const assets: AssetLike[] = [
-      { name: 'package.tar.gz', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
-      { name: 'package.deb', size: 2000, browser_download_url: 'url2', digest: 'sha256:def456' },
+    const assets: GitHubAsset[] = [
+      { id: 1, name: 'package.tar.gz', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { id: 2, name: 'package.deb', size: 2000, browser_download_url: 'url2', digest: 'sha256:def456' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -610,11 +686,11 @@ describe('filterRpmAssets', () => {
   });
 
   it('handles real-world filenames', () => {
-    const assets: AssetLike[] = [
-      { name: 'go-hass-agent-11.2.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc' },
-      { name: 'go-hass-agent-11.2.0-1.aarch64.rpm', size: 1000, browser_download_url: 'url2', digest: 'sha256:def' },
-      { name: 'obsidian-1.5.12-1.x86_64.rpm', size: 2000, browser_download_url: 'url3', digest: 'sha256:ghi' },
-      { name: 'LocalSend-1.14.0-1.linux.x86_64.rpm', size: 3000, browser_download_url: 'url4', digest: 'sha256:jkl' },
+    const assets: GitHubAsset[] = [
+      { id: 1, name: 'go-hass-agent-11.2.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc' },
+      { id: 2, name: 'go-hass-agent-11.2.0-1.aarch64.rpm', size: 1000, browser_download_url: 'url2', digest: 'sha256:def' },
+      { id: 3, name: 'obsidian-1.5.12-1.x86_64.rpm', size: 2000, browser_download_url: 'url3', digest: 'sha256:ghi' },
+      { id: 4, name: 'LocalSend-1.14.0-1.linux.x86_64.rpm', size: 3000, browser_download_url: 'url4', digest: 'sha256:jkl' },
     ];
 
     const result = filterRpmAssets(assets);
@@ -623,25 +699,25 @@ describe('filterRpmAssets', () => {
   });
 
   it('preserves asset type', () => {
-    interface ExtendedAsset extends AssetLike {
-      id: number;
+    interface ExtendedAsset extends GitHubAsset {
+      extra: string;
     }
 
     const assets: ExtendedAsset[] = [
-      { name: 'pkg.rpm', size: 100, browser_download_url: 'url', id: 123, digest: 'sha256:abc123' },
+      { id: 123, name: 'pkg.rpm', size: 100, browser_download_url: 'url', digest: 'sha256:abc123', extra: 'marker' },
     ];
 
     const result = filterRpmAssets(assets);
 
     expect(result).toHaveLength(1);
-    expect(result[0].id).toBe(123);
+    expect(result[0].extra).toBe('marker');
   });
 
   it('excludes assets without digest', () => {
-    const assets: AssetLike[] = [
-      { name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
-      { name: 'package-1.0.0-1.aarch64.rpm', size: 2000, browser_download_url: 'url2' }, // no digest
-      { name: 'package-1.0.0-1.i686.rpm', size: 3000, browser_download_url: 'url3', digest: undefined },
+    const assets: GitHubAsset[] = [
+      { id: 1, name: 'package-1.0.0-1.x86_64.rpm', size: 1000, browser_download_url: 'url1', digest: 'sha256:abc123' },
+      { id: 2, name: 'package-1.0.0-1.aarch64.rpm', size: 2000, browser_download_url: 'url2' }, // no digest
+      { id: 3, name: 'package-1.0.0-1.i686.rpm', size: 3000, browser_download_url: 'url3', digest: undefined },
     ];
 
     const result = filterRpmAssets(assets);
@@ -705,5 +781,158 @@ describe('repodata integration', () => {
     expect(primary).toMatch(/^<\?xml version="1\.0"/);
     expect(filelists).toMatch(/^<\?xml version="1\.0"/);
     expect(other).toMatch(/^<\?xml version="1\.0"/);
+  });
+});
+
+// ============================================================================
+// buildRpmPackageEntry truncation / retry tests
+// ============================================================================
+
+/**
+ * Minimum viable RPM: lead + empty signature header + main header with the
+ * requested tags. Returns a Uint8Array of the complete file.
+ */
+function buildMinimalRpm(
+  tags: { tag: number; type: number; value: string | number | string[] | number[] }[],
+): Uint8Array {
+  const RPM_MAGIC = [0xed, 0xab, 0xee, 0xdb];
+  const HEADER_MAGIC = [0x8e, 0xad, 0xe8];
+
+  const lead = new Uint8Array(96);
+  lead[0] = RPM_MAGIC[0]; lead[1] = RPM_MAGIC[1];
+  lead[2] = RPM_MAGIC[2]; lead[3] = RPM_MAGIC[3];
+  lead[4] = 3;
+
+  function makeHeader(hdrTags: typeof tags): Uint8Array {
+    let dataSize = 0;
+    const idx: { tag: number; type: number; offset: number; count: number }[] = [];
+    for (const { tag, type, value } of hdrTags) {
+      const off = dataSize;
+      let count = 1;
+      if (type === 6) dataSize += (value as string).length + 1;
+      else if (type === 8) {
+        count = (value as string[]).length;
+        for (const s of value as string[]) dataSize += s.length + 1;
+      } else if (type === 4) {
+        if (Array.isArray(value)) { count = value.length; dataSize += 4 * count; }
+        else dataSize += 4;
+      }
+      idx.push({ tag, type, offset: off, count });
+    }
+    const nindex = idx.length;
+    const total = 16 + nindex * 16 + dataSize;
+    const buf = new Uint8Array(total);
+    const dv = new DataView(buf.buffer);
+    buf[0] = HEADER_MAGIC[0]; buf[1] = HEADER_MAGIC[1]; buf[2] = HEADER_MAGIC[2]; buf[3] = 1;
+    dv.setUint32(8, nindex, false);
+    dv.setUint32(12, dataSize, false);
+    for (let i = 0; i < nindex; i++) {
+      const e = idx[i];
+      const o = 16 + i * 16;
+      dv.setUint32(o, e.tag, false);
+      dv.setUint32(o + 4, e.type, false);
+      dv.setUint32(o + 8, e.offset, false);
+      dv.setUint32(o + 12, e.count, false);
+    }
+    const dataStart = 16 + nindex * 16;
+    let dataOff = 0;
+    for (const { type, value } of hdrTags) {
+      if (type === 6) {
+        const s = value as string;
+        buf.set(new TextEncoder().encode(s), dataStart + dataOff);
+        dataOff += s.length + 1;
+      } else if (type === 8) {
+        for (const s of value as string[]) {
+          buf.set(new TextEncoder().encode(s), dataStart + dataOff);
+          dataOff += s.length + 1;
+        }
+      } else if (type === 4) {
+        const arr = Array.isArray(value) ? value as number[] : [value as number];
+        for (const v of arr) { dv.setUint32(dataStart + dataOff, v, false); dataOff += 4; }
+      }
+    }
+    return buf;
+  }
+
+  const sigHdr = makeHeader([]);
+  const sigPad = (8 - (sigHdr.length % 8)) % 8;
+  const mainHdr = makeHeader(tags);
+
+  const total = lead.length + sigHdr.length + sigPad + mainHdr.length;
+  const out = new Uint8Array(total);
+  out.set(lead, 0);
+  out.set(sigHdr, lead.length);
+  out.set(mainHdr, lead.length + sigHdr.length + sigPad);
+  return out;
+}
+
+describe('buildRpmPackageEntry range retry on truncation', () => {
+  beforeEach(() => { vi.stubGlobal('fetch', vi.fn()); });
+  afterEach(() => { vi.unstubAllGlobals(); });
+
+  const asset: GitHubAsset = {
+    id: 1,
+    name: 'big-pkg-1.0-1.x86_64.rpm',
+    size: 999999,
+    browser_download_url: 'https://example.com/big-pkg.rpm',
+    digest: 'sha256:deadbeef',
+  };
+
+  it('retries with a larger range when the 256KB window is truncated', async () => {
+    // Build an RPM whose total size exceeds the 256KB range but fits in 1MB.
+    // A giant SUMMARY pushes the declared header data past 256KB.
+    const bigPad = 'x'.repeat(400_000);
+    const fullRpm = buildMinimalRpm([
+      { tag: 1000, type: 6, value: 'big-pkg' },
+      { tag: 1001, type: 6, value: '1.0' },
+      { tag: 1002, type: 6, value: '1' },
+      { tag: 1022, type: 6, value: 'x86_64' },
+      { tag: 1004, type: 6, value: bigPad },
+    ]);
+
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const range = (init?.headers as Record<string, string> | undefined)?.['Range'] ?? '';
+      const m = range.match(/bytes=0-(\d+)/);
+      const end = m ? parseInt(m[1], 10) : fullRpm.length - 1;
+      const slice = fullRpm.slice(0, Math.min(end + 1, fullRpm.length));
+      return new Response(slice, { status: 206 });
+    });
+
+    const entry = await buildRpmPackageEntry(asset);
+    expect(entry).not.toBeNull();
+    expect(entry!.headerData.name).toBe('big-pkg');
+    // Should have retried at least twice (256KB truncated, 1MB succeeded).
+    expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('drops the asset and returns null when header exceeds the 4MB cap', async () => {
+    // Declare a header hsize that exceeds our 4MB ceiling so every retry fails.
+    // Use a truncated buffer where the main header's declared size is huge.
+    const lead = new Uint8Array(96);
+    lead[0] = 0xed; lead[1] = 0xab; lead[2] = 0xee; lead[3] = 0xdb; lead[4] = 3;
+    // Minimal valid signature header (empty).
+    const sig = new Uint8Array(16);
+    sig[0] = 0x8e; sig[1] = 0xad; sig[2] = 0xe8; sig[3] = 1;
+    const sigPad = (8 - (sig.length % 8)) % 8;
+    // Main header declares 5MB of data but provides none.
+    const main = new Uint8Array(16);
+    const dv = new DataView(main.buffer);
+    main[0] = 0x8e; main[1] = 0xad; main[2] = 0xe8; main[3] = 1;
+    dv.setUint32(8, 0, false);
+    dv.setUint32(12, 5 * 1024 * 1024, false);
+    const total = lead.length + sig.length + sigPad + main.length;
+    const rpm = new Uint8Array(total);
+    rpm.set(lead, 0);
+    rpm.set(sig, lead.length);
+    rpm.set(main, lead.length + sig.length + sigPad);
+
+    vi.mocked(fetch).mockImplementation(async () => new Response(rpm, { status: 206 }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const entry = await buildRpmPackageEntry(asset);
+    expect(entry).toBeNull();
+    expect(vi.mocked(fetch).mock.calls.length).toBe(3); // 256KB, 1MB, 4MB
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 });

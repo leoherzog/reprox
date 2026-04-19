@@ -454,6 +454,94 @@ describe('handlePublicKey - extended', () => {
 });
 
 // ============================================================================
+// Route Validation Tests
+// ============================================================================
+
+describe('route validation', () => {
+  const ctx = createMockExecutionContext();
+
+  it('rejects invalid owner with too long name', async () => {
+    const env = createMockEnv();
+    const longOwner = 'a'.repeat(50); // GitHub max is 39
+    const request = new Request(`https://example.com/${longOwner}/repo/public.key`);
+
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('Invalid owner name');
+  });
+
+  it('rejects invalid owner with special characters', async () => {
+    const env = createMockEnv();
+    const request = new Request('https://example.com/owner@invalid/repo/public.key');
+
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('Invalid owner name');
+  });
+
+  it('rejects owner starting with special characters', async () => {
+    const env = createMockEnv();
+    const request = new Request('https://example.com/-invalid/repo/public.key');
+
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('Invalid owner name');
+  });
+
+  it('rejects invalid repo with too long name', async () => {
+    const env = createMockEnv();
+    const longRepo = 'a'.repeat(150); // GitHub max is 100
+    const request = new Request(`https://example.com/owner/${longRepo}/public.key`);
+
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('Invalid repository name');
+  });
+
+  it('rejects repo with invalid characters', async () => {
+    const env = createMockEnv();
+    const request = new Request('https://example.com/owner/repo$invalid/public.key');
+
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('Invalid repository name');
+  });
+
+  it('accepts valid GitHub naming patterns', async () => {
+    const env = createMockEnv({ GPG_PUBLIC_KEY: 'test-key' });
+
+    const validPaths = [
+      '/valid-owner/valid-repo/public.key',
+      '/owner123/repo_name/public.key',
+      '/Owner/Repo.Name/public.key',
+      '/a/b/public.key', // Minimum length
+    ];
+
+    for (const path of validPaths) {
+      const request = new Request(`https://example.com${path}`);
+      const response = await worker.fetch(request, env, ctx);
+      // Should not be 400 for valid names
+      expect(response.status).not.toBe(400);
+    }
+  });
+
+  it('returns 400 for missing owner/repo', async () => {
+    const env = createMockEnv();
+    const request = new Request('https://example.com/onlyowner');
+
+    const response = await worker.fetch(request, env, ctx);
+
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain('Invalid repository path');
+  });
+});
+
+// ============================================================================
 // Cache Invalidation Tests
 // ============================================================================
 

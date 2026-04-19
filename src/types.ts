@@ -164,15 +164,3 @@ export interface RpmPackageEntry {
   checksumType: string;
 }
 
-/**
- * Minimal asset type for filtering (subset of GitHubAsset)
- */
-export type AssetLike = { name: string; size: number; browser_download_url: string; digest?: string };
-
-/**
- * Asset with release context for multi-release aggregation
- */
-export interface AggregatedAsset extends GitHubAsset {
-  releaseTagName: string;
-  releaseId: number;
-}

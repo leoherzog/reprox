@@ -3,13 +3,24 @@
  *
  * Handles caching of package metadata using the Workers Cache API.
  * Uses synthetic URLs to create cache keys with release variant:
- * - https://reprox.internal/packages/{variant}/{owner}/{repo}/{arch}
+ * - https://reprox.internal/packages-blob/{variant}/{owner}/{repo}/{sha256}
  * - https://reprox.internal/release/{variant}/{owner}/{repo}
  * - https://reprox.internal/inrelease/{variant}/{owner}/{repo}
+ * - https://reprox.internal/release-gpg/{variant}/{owner}/{repo}
  * - https://reprox.internal/release-ids-hash/{variant}/{owner}/{repo}
- * - https://reprox.internal/rpm/primary/{variant}/{owner}/{repo}
- * - https://reprox.internal/rpm/filelists/{variant}/{owner}/{repo}
- * - https://reprox.internal/rpm/other/{variant}/{owner}/{repo}
+ * - https://reprox.internal/rpm/repomd/{variant}/{owner}/{repo}
+ * - https://reprox.internal/rpm/repomd-asc/{variant}/{owner}/{repo}
+ * - https://reprox.internal/rpm/blob/{variant}/{owner}/{repo}/{sha256}
+ *
+ * All package-index bodies (APT Packages/Packages.gz, RPM primary/filelists/
+ * other .xml/.xml.gz) are stored as immutable content-addressed blobs keyed
+ * by their SHA256. (In)Release and repomd.xml pin those SHA256s, so a client
+ * holding any historical top-level metadata file can always resolve every
+ * reference against the exact bytes that were hashed into it — even after
+ * background refresh has produced a new top-level metadata file pointing at
+ * different blobs. The legacy non-by-hash APT URL
+ * `binary-{arch}/Packages[.gz]` is served by parsing the current Release and
+ * looking up the referenced blob; there is no separate mutable cache key.
  */
 
 import type { GitHubRelease } from '../types';
@@ -93,12 +104,40 @@ export class CacheManager {
     await this.cache.put(request, response);
   }
 
+  /**
+   * Get a raw Response from cache (for binary blobs).
+   * Returns the full cached Response so callers can stream the body.
+   */
+  private async getResponseFromCache(key: string): Promise<Response | null> {
+    const request = this.createCacheRequest(key);
+    return (await this.cache.match(request)) ?? null;
+  }
+
+  /**
+   * Store a binary body in cache with a specific Content-Type.
+   */
+  private async putBytesInCache(
+    key: string,
+    body: Uint8Array,
+    contentType: string,
+    ttl: number
+  ): Promise<void> {
+    const request = this.createCacheRequest(key);
+    const response = new Response(body, {
+      headers: {
+        'Content-Type': contentType,
+        'Cache-Control': `public, max-age=${ttl}`,
+      },
+    });
+    await this.cache.put(request, response);
+  }
+
   // =============================================================================
   // Key Generation (all keys include variant for stable/prerelease separation)
   // =============================================================================
 
-  private packagesKey(owner: string, repo: string, arch: string, variant: ReleaseVariant): string {
-    return `packages/${variant}/${owner}/${repo}/${arch}`;
+  private packagesBlobKey(owner: string, repo: string, variant: ReleaseVariant, sha256: string): string {
+    return `packages-blob/${variant}/${owner}/${repo}/${sha256}`;
   }
 
   private releaseKey(owner: string, repo: string, variant: ReleaseVariant): string {
@@ -117,20 +156,16 @@ export class CacheManager {
     return `release-ids-hash/${variant}/${owner}/${repo}`;
   }
 
-  private rpmMetadataKey(owner: string, repo: string, type: 'primary' | 'filelists' | 'other', variant: ReleaseVariant): string {
-    return `rpm/${type}/${variant}/${owner}/${repo}`;
-  }
-
-  private rpmTimestampKey(owner: string, repo: string, variant: ReleaseVariant): string {
-    return `rpm/timestamp/${variant}/${owner}/${repo}`;
-  }
-
   private rpmRepomdKey(owner: string, repo: string, variant: ReleaseVariant): string {
     return `rpm/repomd/${variant}/${owner}/${repo}`;
   }
 
   private rpmRepomdAscKey(owner: string, repo: string, variant: ReleaseVariant): string {
     return `rpm/repomd-asc/${variant}/${owner}/${repo}`;
+  }
+
+  private rpmBlobKey(owner: string, repo: string, variant: ReleaseVariant, sha256: string): string {
+    return `rpm/blob/${variant}/${owner}/${repo}/${sha256}`;
   }
 
   private assetUrlKey(owner: string, repo: string, filename: string, variant: ReleaseVariant, releaseHash: string): string {
@@ -143,30 +178,37 @@ export class CacheManager {
   // =============================================================================
 
   /**
-   * Get cached Packages file content
+   * Retrieve a content-addressed APT Packages blob (either the uncompressed
+   * Packages file or its .gz form) keyed by SHA256. Used by both `by-hash/`
+   * clients and the legacy `binary-{arch}/Packages[.gz]` handler (which looks
+   * up the current Release's SHA256 and then fetches the blob), so the served
+   * bytes are always the exact ones the current Release's checksums pin.
    */
-  async getPackagesFile(
+  async getPackagesBlob(
     owner: string,
     repo: string,
-    arch: string,
-    variant: ReleaseVariant
-  ): Promise<string | null> {
-    const key = this.packagesKey(owner, repo, arch, variant);
-    return this.getFromCache(key);
+    variant: ReleaseVariant,
+    sha256: string
+  ): Promise<Response | null> {
+    const key = this.packagesBlobKey(owner, repo, variant, sha256);
+    return this.getResponseFromCache(key);
   }
 
   /**
-   * Store Packages file content
+   * Store a content-addressed APT Packages blob keyed by its SHA256. Blobs
+   * are immutable: once written, any (In)Release referencing this hash can
+   * be served consistently regardless of later regenerations.
    */
-  async setPackagesFile(
+  async setPackagesBlob(
     owner: string,
     repo: string,
-    arch: string,
     variant: ReleaseVariant,
-    content: string
+    sha256: string,
+    body: Uint8Array,
+    contentType: string
   ): Promise<void> {
-    const key = this.packagesKey(owner, repo, arch, variant);
-    await this.putInCache(key, content, this.defaultTtl);
+    const key = this.packagesBlobKey(owner, repo, variant, sha256);
+    await this.putBytesInCache(key, body, contentType, this.defaultTtl);
   }
 
   /**
@@ -260,73 +302,6 @@ export class CacheManager {
   // =============================================================================
 
   /**
-   * Get cached RPM primary.xml content
-   */
-  async getRpmPrimaryXml(owner: string, repo: string, variant: ReleaseVariant): Promise<string | null> {
-    const key = this.rpmMetadataKey(owner, repo, 'primary', variant);
-    return this.getFromCache(key);
-  }
-
-  /**
-   * Store RPM primary.xml content
-   */
-  async setRpmPrimaryXml(owner: string, repo: string, variant: ReleaseVariant, content: string): Promise<void> {
-    const key = this.rpmMetadataKey(owner, repo, 'primary', variant);
-    await this.putInCache(key, content, this.defaultTtl);
-  }
-
-  /**
-   * Get cached RPM filelists.xml content
-   */
-  async getRpmFilelistsXml(owner: string, repo: string, variant: ReleaseVariant): Promise<string | null> {
-    const key = this.rpmMetadataKey(owner, repo, 'filelists', variant);
-    return this.getFromCache(key);
-  }
-
-  /**
-   * Store RPM filelists.xml content
-   */
-  async setRpmFilelistsXml(owner: string, repo: string, variant: ReleaseVariant, content: string): Promise<void> {
-    const key = this.rpmMetadataKey(owner, repo, 'filelists', variant);
-    await this.putInCache(key, content, this.defaultTtl);
-  }
-
-  /**
-   * Get cached RPM other.xml content
-   */
-  async getRpmOtherXml(owner: string, repo: string, variant: ReleaseVariant): Promise<string | null> {
-    const key = this.rpmMetadataKey(owner, repo, 'other', variant);
-    return this.getFromCache(key);
-  }
-
-  /**
-   * Store RPM other.xml content
-   */
-  async setRpmOtherXml(owner: string, repo: string, variant: ReleaseVariant, content: string): Promise<void> {
-    const key = this.rpmMetadataKey(owner, repo, 'other', variant);
-    await this.putInCache(key, content, this.defaultTtl);
-  }
-
-  /**
-   * Get cached RPM timestamp (for consistent repomd.xml generation)
-   */
-  async getRpmTimestamp(owner: string, repo: string, variant: ReleaseVariant): Promise<number | null> {
-    const key = this.rpmTimestampKey(owner, repo, variant);
-    const value = await this.getFromCache(key);
-    if (!value) return null;
-    const parsed = parseInt(value, 10);
-    return isNaN(parsed) ? null : parsed;
-  }
-
-  /**
-   * Store RPM timestamp
-   */
-  async setRpmTimestamp(owner: string, repo: string, variant: ReleaseVariant, timestamp: number): Promise<void> {
-    const key = this.rpmTimestampKey(owner, repo, variant);
-    await this.putInCache(key, timestamp.toString(), this.defaultTtl);
-  }
-
-  /**
    * Get cached repomd.xml content
    */
   async getRpmRepomd(owner: string, repo: string, variant: ReleaseVariant): Promise<string | null> {
@@ -356,6 +331,42 @@ export class CacheManager {
   async setRpmRepomdAsc(owner: string, repo: string, variant: ReleaseVariant, content: string): Promise<void> {
     const key = this.rpmRepomdAscKey(owner, repo, variant);
     await this.putInCache(key, content, this.defaultTtl);
+  }
+
+  /**
+   * Retrieve a content-addressed RPM metadata blob (primary/filelists/other,
+   * either .xml or .xml.gz). Returns the full cached Response so the caller
+   * can stream the body directly and preserve the stored Content-Type.
+   *
+   * The SHA256 key is taken from the <location href> in repomd.xml, so any
+   * client holding a valid repomd.xml can always ask for the exact bytes it
+   * was told to expect.
+   */
+  async getRpmBlob(
+    owner: string,
+    repo: string,
+    variant: ReleaseVariant,
+    sha256: string
+  ): Promise<Response | null> {
+    const key = this.rpmBlobKey(owner, repo, variant, sha256);
+    return this.getResponseFromCache(key);
+  }
+
+  /**
+   * Store a content-addressed RPM metadata blob keyed by its SHA256.
+   * Blobs are immutable: once written, any repomd.xml referencing this hash
+   * can be served consistently regardless of later regenerations.
+   */
+  async setRpmBlob(
+    owner: string,
+    repo: string,
+    variant: ReleaseVariant,
+    sha256: string,
+    body: Uint8Array,
+    contentType: string
+  ): Promise<void> {
+    const key = this.rpmBlobKey(owner, repo, variant, sha256);
+    await this.putBytesInCache(key, body, contentType, this.defaultTtl);
   }
 
   // =============================================================================
@@ -409,33 +420,27 @@ export class CacheManager {
   }
 
   /**
-   * Clear all cached content for a repository (both stable and prerelease variants)
+   * Clear all cached top-level metadata for a repository (both stable and
+   * prerelease variants). Content-addressed blobs (`packages-blob/...`,
+   * `rpm/blob/...`) are keyed by sha256 and cannot be enumerated, so we rely
+   * on their TTL for eviction — but clearing the release-ids-hash here forces
+   * the next request to regenerate, and any client whose last request was
+   * served against the now-cleared top-level files will fetch fresh hashes
+   * and thus new blobs on its next round-trip.
    */
   async clearAllCache(owner: string, repo: string): Promise<void> {
     const variants: ReleaseVariant[] = ['stable', 'prerelease'];
-    const architectures = ['amd64', 'arm64', 'i386', 'armhf', 'all'];
     const keys: string[] = [];
 
     for (const variant of variants) {
-      // APT cache keys
       keys.push(this.releaseKey(owner, repo, variant));
       keys.push(this.inReleaseKey(owner, repo, variant));
       keys.push(this.releaseGpgKey(owner, repo, variant));
       keys.push(this.releaseIdsHashKey(owner, repo, variant));
-      // APT Packages files for all known architectures
-      for (const arch of architectures) {
-        keys.push(this.packagesKey(owner, repo, arch, variant));
-      }
-      // RPM cache keys
-      keys.push(this.rpmMetadataKey(owner, repo, 'primary', variant));
-      keys.push(this.rpmMetadataKey(owner, repo, 'filelists', variant));
-      keys.push(this.rpmMetadataKey(owner, repo, 'other', variant));
-      keys.push(this.rpmTimestampKey(owner, repo, variant));
       keys.push(this.rpmRepomdKey(owner, repo, variant));
       keys.push(this.rpmRepomdAscKey(owner, repo, variant));
     }
 
-    // Delete all cached entries
     await Promise.all(
       keys.map(key => this.cache.delete(this.createCacheRequest(key)))
     );
