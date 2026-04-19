@@ -1,6 +1,6 @@
 {
   "name": "reprox",
-  "version": "1.2.0",
+  "version": "dev",
   "type": "module",
   "description": "Serverless APT/RPM Repository Gateway using Cloudflare Workers",
   "main": "src/index.ts",
