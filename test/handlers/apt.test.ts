@@ -122,11 +122,14 @@ describe('handleInRelease', () => {
   });
 
   it('throws error when no releases found', async () => {
+    // Use a unique owner/repo so the Workers Cache from previous tests in
+    // this file (which vitest-pool-workers 0.14 no longer isolates per-test)
+    // cannot short-circuit this request with a cached InRelease.
     const env = createMockEnv({ GITHUB_TOKEN: 'test-token' });
     const ctx = createMockExecutionContext();
     mockGitHubReleasesAPI([]); // Empty releases
 
-    const request = new Request('https://example.com/owner/repo/dists/stable/InRelease');
+    const request = new Request('https://example.com/empty-inrelease-owner/empty-inrelease-repo/dists/stable/InRelease');
 
     await expect(fetchAndFlush(request, env, ctx)).rejects.toThrow('No releases found');
   });
@@ -209,11 +212,14 @@ describe('handleRelease', () => {
   });
 
   it('throws error when no releases found', async () => {
+    // Use a unique owner/repo so the Workers Cache from previous tests in
+    // this file (which vitest-pool-workers 0.14 no longer isolates per-test)
+    // cannot short-circuit this request with a cached Release.
     const env = createMockEnv({ GITHUB_TOKEN: 'test-token' });
     const ctx = createMockExecutionContext();
     mockGitHubReleasesAPI([]);
 
-    const request = new Request('https://example.com/owner/repo/dists/stable/Release');
+    const request = new Request('https://example.com/empty-release-owner/empty-release-repo/dists/stable/Release');
 
     await expect(fetchAndFlush(request, env, ctx)).rejects.toThrow('No releases found');
   });
