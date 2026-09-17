@@ -551,9 +551,9 @@ describe('handleBinaryRedirect - RPM', () => {
   });
 
   it('returns 404 when no releases exist', async () => {
-    // Use a unique owner/repo so the Workers Cache from previous tests in
-    // this file (which vitest-pool-workers 0.14 no longer isolates per-test)
-    // cannot serve a stale cached asset URL and redirect with 302.
+    // The Workers Cache is shared across tests in this file. A unique
+    // owner/repo keeps earlier tests from serving a stale cached asset URL
+    // and redirecting with 302.
     const env = createMockEnv({ GITHUB_TOKEN: '' });
     const ctx = createMockExecutionContext();
     mockPublicRepo([]);

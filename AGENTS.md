@@ -183,7 +183,7 @@ Optional secrets (set via `wrangler secret put`):
 
 ## Testing
 
-Tests use Vitest with `@cloudflare/vitest-pool-workers` to run in a Workers-like environment. Test files are in `test/` directory.
+Tests use Vitest with `@cloudflare/vitest-plugin` to run in a Workers-like environment. Test files are in `test/` directory.
 
 ```bash
 npm run test                    # Run all tests

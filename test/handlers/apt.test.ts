@@ -122,9 +122,9 @@ describe('handleInRelease', () => {
   });
 
   it('returns 500 when no releases found', async () => {
-    // Use a unique owner/repo so the Workers Cache from previous tests in
-    // this file (which vitest-pool-workers 0.14 no longer isolates per-test)
-    // cannot short-circuit this request with a cached InRelease.
+    // The Workers Cache is shared across tests in this file. A unique
+    // owner/repo keeps earlier tests from short-circuiting this request
+    // with a cached InRelease.
     const env = createMockEnv({ GITHUB_TOKEN: 'test-token' });
     const ctx = createMockExecutionContext();
     mockGitHubReleasesAPI([]); // Empty releases
@@ -215,9 +215,9 @@ describe('handleRelease', () => {
   });
 
   it('returns 500 when no releases found', async () => {
-    // Use a unique owner/repo so the Workers Cache from previous tests in
-    // this file (which vitest-pool-workers 0.14 no longer isolates per-test)
-    // cannot short-circuit this request with a cached Release.
+    // The Workers Cache is shared across tests in this file. A unique
+    // owner/repo keeps earlier tests from short-circuiting this request
+    // with a cached Release.
     const env = createMockEnv({ GITHUB_TOKEN: 'test-token' });
     const ctx = createMockExecutionContext();
     mockGitHubReleasesAPI([]);
