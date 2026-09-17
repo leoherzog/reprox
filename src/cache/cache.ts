@@ -8,9 +8,9 @@
  * - https://reprox.internal/inrelease/{variant}/{owner}/{repo}
  * - https://reprox.internal/release-gpg/{variant}/{owner}/{repo}
  * - https://reprox.internal/release-ids-hash/{variant}/{owner}/{repo}
- * - https://reprox.internal/rpm/repomd/{variant}/{owner}/{repo}
- * - https://reprox.internal/rpm/repomd-asc/{variant}/{owner}/{repo}
+ * - https://reprox.internal/rpm/snapshot/{variant}/{owner}/{repo}
  * - https://reprox.internal/rpm/blob/{variant}/{owner}/{repo}/{sha256}
+ * - https://reprox.internal/rpm/entry/{owner}/{repo}/{sha256}/{filename}
  *
  * All package-index bodies (APT Packages/Packages.gz, RPM primary/filelists/
  * other .xml/.xml.gz) are stored as immutable content-addressed blobs keyed
@@ -23,10 +23,21 @@
  * looking up the referenced blob; there is no separate mutable cache key.
  */
 
-import type { GitHubRelease } from '../types';
+import type { GitHubRelease, RpmPackageEntry } from '../types';
 import { sha256 } from '../utils/crypto';
 
 export type ReleaseVariant = 'stable' | 'prerelease';
+
+/**
+ * The top-level RPM metadata for one release state. repomd.xml and its
+ * detached signature live in one cache entry so a reader never sees a
+ * signature from a different build than the repomd.xml beside it.
+ */
+export interface CachedRpmSnapshot {
+  repomd: string;
+  signature: string | null;
+  releaseIdsHash: string;
+}
 
 /**
  * Compute a hash of releases AND their asset digests for cache invalidation.
@@ -156,12 +167,12 @@ export class CacheManager {
     return `release-ids-hash/${variant}/${owner}/${repo}`;
   }
 
-  private rpmRepomdKey(owner: string, repo: string, variant: ReleaseVariant): string {
-    return `rpm/repomd/${variant}/${owner}/${repo}`;
+  private rpmSnapshotKey(owner: string, repo: string, variant: ReleaseVariant): string {
+    return `rpm/snapshot/${variant}/${owner}/${repo}`;
   }
 
-  private rpmRepomdAscKey(owner: string, repo: string, variant: ReleaseVariant): string {
-    return `rpm/repomd-asc/${variant}/${owner}/${repo}`;
+  private rpmEntryKey(owner: string, repo: string, sha256: string, filename: string): string {
+    return `rpm/entry/${owner}/${repo}/${sha256}/${encodeURIComponent(filename)}`;
   }
 
   private rpmBlobKey(owner: string, repo: string, variant: ReleaseVariant, sha256: string): string {
@@ -302,35 +313,51 @@ export class CacheManager {
   // =============================================================================
 
   /**
-   * Get cached repomd.xml content
+   * Get the cached repomd.xml + signature pair.
    */
-  async getRpmRepomd(owner: string, repo: string, variant: ReleaseVariant): Promise<string | null> {
-    const key = this.rpmRepomdKey(owner, repo, variant);
-    return this.getFromCache(key);
+  async getRpmSnapshot(owner: string, repo: string, variant: ReleaseVariant): Promise<CachedRpmSnapshot | null> {
+    const raw = await this.getFromCache(this.rpmSnapshotKey(owner, repo, variant));
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as CachedRpmSnapshot;
+    } catch {
+      return null;
+    }
   }
 
   /**
-   * Store repomd.xml content
+   * Store the repomd.xml + signature pair as a single entry.
    */
-  async setRpmRepomd(owner: string, repo: string, variant: ReleaseVariant, content: string): Promise<void> {
-    const key = this.rpmRepomdKey(owner, repo, variant);
-    await this.putInCache(key, content, this.defaultTtl);
+  async setRpmSnapshot(
+    owner: string,
+    repo: string,
+    variant: ReleaseVariant,
+    snapshot: CachedRpmSnapshot
+  ): Promise<void> {
+    const key = this.rpmSnapshotKey(owner, repo, variant);
+    await this.putInCache(key, JSON.stringify(snapshot), this.defaultTtl);
   }
 
   /**
-   * Get cached repomd.xml.asc signature
+   * Get the parsed header entry for an RPM asset. Keyed by the asset's
+   * SHA256, so an entry never goes stale.
    */
-  async getRpmRepomdAsc(owner: string, repo: string, variant: ReleaseVariant): Promise<string | null> {
-    const key = this.rpmRepomdAscKey(owner, repo, variant);
-    return this.getFromCache(key);
+  async getRpmEntry(owner: string, repo: string, sha256: string, filename: string): Promise<RpmPackageEntry | null> {
+    const raw = await this.getFromCache(this.rpmEntryKey(owner, repo, sha256, filename));
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw) as RpmPackageEntry;
+    } catch {
+      return null;
+    }
   }
 
   /**
-   * Store repomd.xml.asc signature
+   * Store the parsed header entry for an RPM asset.
    */
-  async setRpmRepomdAsc(owner: string, repo: string, variant: ReleaseVariant, content: string): Promise<void> {
-    const key = this.rpmRepomdAscKey(owner, repo, variant);
-    await this.putInCache(key, content, this.defaultTtl);
+  async setRpmEntry(owner: string, repo: string, sha256: string, filename: string, entry: RpmPackageEntry): Promise<void> {
+    const key = this.rpmEntryKey(owner, repo, sha256, filename);
+    await this.putInCache(key, JSON.stringify(entry), this.defaultTtl);
   }
 
   /**
@@ -437,8 +464,7 @@ export class CacheManager {
       keys.push(this.inReleaseKey(owner, repo, variant));
       keys.push(this.releaseGpgKey(owner, repo, variant));
       keys.push(this.releaseIdsHashKey(owner, repo, variant));
-      keys.push(this.rpmRepomdKey(owner, repo, variant));
-      keys.push(this.rpmRepomdAscKey(owner, repo, variant));
+      keys.push(this.rpmSnapshotKey(owner, repo, variant));
     }
 
     await Promise.all(

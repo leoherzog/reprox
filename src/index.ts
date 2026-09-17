@@ -22,6 +22,7 @@ import {
   filterRpmAssets,
 } from './generators/repodata';
 import type { RepomdHashes } from './generators/repodata';
+import { RpmFetchError } from './parsers/rpm';
 import { signCleartext, signDetached, signDetachedBinary, extractPublicKey, getKeyFingerprint } from './signing/gpg';
 import { gzipCompress, sha256 } from './utils/crypto';
 import { README_HTML, README_MARKDOWN } from './generated/readme-html';
@@ -107,62 +108,68 @@ export default {
       // Route handling
       switch (route.type) {
         case 'public-key':
-          return handlePublicKey(env);
+          return await handlePublicKey(env);
 
         case 'inrelease':
-          return handleInRelease(route, github, cache, env, ctx);
+          return await handleInRelease(route, github, cache, env, ctx);
 
         case 'release':
-          return handleRelease(route, github, cache, env, ctx);
+          return await handleRelease(route, github, cache, env, ctx);
 
         case 'release-gpg':
-          return handleReleaseGpg(route, github, cache, env, ctx);
+          return await handleReleaseGpg(route, github, cache, env, ctx);
 
         case 'packages':
-          return handlePackages(route, github, cache, env, ctx);
+          return await handlePackages(route, github, cache, env, ctx);
 
         case 'packages-gz':
-          return handlePackagesGz(route, github, cache, env, ctx);
+          return await handlePackagesGz(route, github, cache, env, ctx);
 
         case 'binary':
-          return handleBinaryRedirect(route, github, cache, env);
+          return await handleBinaryRedirect(route, github, cache, env);
 
         case 'by-hash':
-          return handleByHash(route, github, cache, env, ctx);
+          return await handleByHash(route, github, cache, env, ctx);
 
         // RPM routes
         case 'repomd':
-          return handleRepomd(route, github, cache, env, ctx);
+          return await handleRepomd(route, github, cache, env, ctx);
 
         case 'repomd-asc':
-          return handleRepomdAsc(route, github, cache, env, ctx);
+          return await handleRepomdAsc(route, github, cache, env, ctx);
 
         case 'primary':
-          return handleRpmXml(route, github, cache, env, ctx, 'primary', false);
+          return await handleRpmXml(route, github, cache, env, ctx, 'primary', false);
 
         case 'primary-gz':
-          return handleRpmXml(route, github, cache, env, ctx, 'primary', true);
+          return await handleRpmXml(route, github, cache, env, ctx, 'primary', true);
 
         case 'filelists':
-          return handleRpmXml(route, github, cache, env, ctx, 'filelists', false);
+          return await handleRpmXml(route, github, cache, env, ctx, 'filelists', false);
 
         case 'filelists-gz':
-          return handleRpmXml(route, github, cache, env, ctx, 'filelists', true);
+          return await handleRpmXml(route, github, cache, env, ctx, 'filelists', true);
 
         case 'other':
-          return handleRpmXml(route, github, cache, env, ctx, 'other', false);
+          return await handleRpmXml(route, github, cache, env, ctx, 'other', false);
 
         case 'other-gz':
-          return handleRpmXml(route, github, cache, env, ctx, 'other', true);
+          return await handleRpmXml(route, github, cache, env, ctx, 'other', true);
 
         case 'rpm-binary':
-          return handleBinaryRedirect(route, github, cache, env, 'rpm');
+          return await handleBinaryRedirect(route, github, cache, env, 'rpm');
 
         default:
           return new Response('Not Found', { status: 404 });
       }
     } catch (error) {
       console.error('Request failed:', error);
+      if (error instanceof IncompleteSnapshotError) {
+        return new Response('Upstream package fetch failed, retry shortly', {
+          status: 503,
+          headers: { 'Retry-After': '5' },
+        });
+      }
       const message = error instanceof Error ? error.message : 'Internal Server Error';
       return new Response(message, { status: 500 });
     }
@@ -1281,37 +1288,93 @@ interface RpmSnapshot {
 }
 
 /**
- * Build RPM package entries from assets
+ * Thrown when a package header could not be fetched. A snapshot built
+ * without that package would differ from one built elsewhere for the same
+ * releases, and its signature would not verify against their repomd.xml.
+ */
+export class IncompleteSnapshotError extends Error {
+  constructor(failed: string[]) {
+    super(`Could not fetch RPM headers for: ${failed.join(', ')}`);
+    this.name = 'IncompleteSnapshotError';
+  }
+}
+
+const RPM_FETCH_ATTEMPTS = 3;
+const RPM_FETCH_BACKOFF_MS = 250;
+
+/**
+ * Build one package entry, retrying fetch failures with backoff.
+ * @returns the entry, or null when the package itself is unusable
+ * @throws RpmFetchError when every attempt failed to fetch
+ */
+async function buildRpmPackageEntryWithRetry(
+  asset: GitHubAsset,
+  githubToken?: string
+): Promise<RpmPackageEntry | null> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await buildRpmPackageEntry(asset, githubToken);
+    } catch (error) {
+      if (!(error instanceof RpmFetchError)) {
+        console.error(`Failed to process ${asset.name}:`, error);
+        return null;
+      }
+      if (attempt === RPM_FETCH_ATTEMPTS) throw error;
+      await new Promise(resolve => setTimeout(resolve, RPM_FETCH_BACKOFF_MS * 2 ** (attempt - 1)));
+    }
+  }
+}
+
+/**
+ * Build RPM package entries from assets. Entries are cached per asset
+ * digest, so a build that aborts still keeps the headers it did fetch.
+ * @throws IncompleteSnapshotError when any header fetch failed
  */
 async function buildRpmPackages(
+  route: RouteInfo,
+  cache: CacheManager,
   assets: GitHubAsset[],
   githubToken?: string
 ): Promise<RpmPackageEntry[]> {
+  const { owner, repo } = route;
   const rpmAssets = filterRpmAssets(assets);
+  const failed: string[] = [];
 
-  // Build RPM entries with concurrency limiting to avoid subrequest limits
-  // (Cloudflare Workers limits: 50 free tier, 1000 paid tier)
-  return mapWithConcurrencyFiltered(
+  // Concurrency is limited to stay under the Workers subrequest limit.
+  const entries = await mapWithConcurrencyFiltered(
     rpmAssets,
     async (asset) => {
+      // filterRpmAssets guarantees a "sha256:" digest.
+      const sha256 = asset.digest!.slice(7);
+      const cached = await cache.getRpmEntry(owner, repo, sha256, asset.name);
+      if (cached) return cached;
+
       try {
-        return await buildRpmPackageEntry(asset, githubToken);
+        const entry = await buildRpmPackageEntryWithRetry(asset, githubToken);
+        if (entry) await cache.setRpmEntry(owner, repo, sha256, asset.name, entry);
+        return entry;
       } catch (error) {
-        console.error(`Failed to process ${asset.name}:`, error);
+        console.error(`Failed to fetch ${asset.name}:`, error);
+        failed.push(asset.name);
         return null;
       }
     },
     30
   );
+
+  if (failed.length > 0) throw new IncompleteSnapshotError(failed);
+  return entries;
 }
 
 /**
- * Build a complete, internally-consistent RPM metadata snapshot from scratch.
- * Hits GitHub for releases and parses RPM headers. Does not touch the cache.
+ * Build a complete, internally-consistent RPM metadata snapshot. The output
+ * depends only on the release list, so every colo builds identical bytes.
+ * @throws IncompleteSnapshotError when any header fetch failed
  */
 async function buildRpmSnapshot(
   route: RouteInfo,
   github: GitHubClient,
+  cache: CacheManager,
   env: Env
 ): Promise<RpmSnapshot | null> {
   const { owner, repo, releaseVariant } = route;
@@ -1322,7 +1385,7 @@ async function buildRpmSnapshot(
 
   const releaseIdsHash = await computeReleaseIdsHash(releases);
   const allAssets = aggregateAssets(releases);
-  const packages = await buildRpmPackages(allAssets, env.GITHUB_TOKEN);
+  const packages = await buildRpmPackages(route, cache, allAssets, env.GITHUB_TOKEN);
 
   const primaryXml = generatePrimaryXml(packages);
   const filelistsXml = generateFilelistsXml(packages);
@@ -1380,20 +1443,21 @@ async function cacheRpmSnapshot(
     )
   );
 
-  // Then swap in the repomd.xml (and its signature) that references them.
-  const repomdWrites: Promise<void>[] = [
-    cache.setRpmRepomd(owner, repo, releaseVariant, snapshot.repomdXml),
+  // Then swap in the repomd.xml and signature that reference them.
+  await Promise.all([
+    cache.setRpmSnapshot(owner, repo, releaseVariant, {
+      repomd: snapshot.repomdXml,
+      signature: snapshot.signature,
+      releaseIdsHash: snapshot.releaseIdsHash,
+    }),
     cache.setReleaseIdsHash(owner, repo, releaseVariant, snapshot.releaseIdsHash),
-  ];
-  if (snapshot.signature) {
-    repomdWrites.push(cache.setRpmRepomdAsc(owner, repo, releaseVariant, snapshot.signature));
-  }
-  await Promise.all(repomdWrites);
+  ]);
 }
 
 /**
- * Background task: if the release-ids-hash has changed, rebuild the snapshot
- * and write it. Blob cache keys are content-addressed so this never
+ * Background task: if the releases no longer match the cached snapshot,
+ * rebuild it and write it. A failed rebuild leaves the cached snapshot in
+ * place. Blob cache keys are content-addressed so this never
  * invalidates in-flight references from clients holding the previous
  * repomd.xml — they continue to resolve against the older immutable blobs
  * (until the blob TTL expires, 24h by default).
@@ -1402,7 +1466,8 @@ async function validateAndRefreshRpmSnapshot(
   route: RouteInfo,
   github: GitHubClient,
   cache: CacheManager,
-  env: Env
+  env: Env,
+  cachedReleaseIdsHash: string
 ): Promise<void> {
   try {
     const { owner, repo, releaseVariant } = route;
@@ -1411,9 +1476,13 @@ async function validateAndRefreshRpmSnapshot(
     if (releases.length === 0) return;
 
     const currentHash = await computeReleaseIdsHash(releases);
-    if (!(await cache.needsRefresh(owner, repo, releaseVariant, currentHash))) return;
+    if (currentHash === cachedReleaseIdsHash) {
+      // Keeps the asset URL cache addressable between rebuilds.
+      await cache.setReleaseIdsHash(owner, repo, releaseVariant, currentHash);
+      return;
+    }
 
-    const snapshot = await buildRpmSnapshot(route, github, env);
+    const snapshot = await buildRpmSnapshot(route, github, cache, env);
     if (!snapshot) return;
     await cacheRpmSnapshot(route, cache, snapshot);
   } catch (error) {
@@ -1435,17 +1504,14 @@ async function getRepomdWithSignature(
 ): Promise<{ repomd: string; signature: string | null }> {
   const { owner, repo, releaseVariant } = route;
 
-  const [cachedRepomd, cachedSignature] = await Promise.all([
-    cache.getRpmRepomd(owner, repo, releaseVariant),
-    cache.getRpmRepomdAsc(owner, repo, releaseVariant),
-  ]);
+  const cached = await cache.getRpmSnapshot(owner, repo, releaseVariant);
 
-  if (cachedRepomd && (cachedSignature || !env.GPG_PRIVATE_KEY)) {
-    ctx.waitUntil(validateAndRefreshRpmSnapshot(route, github, cache, env));
-    return { repomd: cachedRepomd, signature: cachedSignature };
+  if (cached && (cached.signature || !env.GPG_PRIVATE_KEY)) {
+    ctx.waitUntil(validateAndRefreshRpmSnapshot(route, github, cache, env, cached.releaseIdsHash));
+    return { repomd: cached.repomd, signature: cached.signature };
   }
 
-  const snapshot = await buildRpmSnapshot(route, github, env);
+  const snapshot = await buildRpmSnapshot(route, github, cache, env);
   if (!snapshot) {
     // No releases — return an empty repomd.xml so DNF doesn't error out.
     const empty = await buildRepomd({
@@ -1542,7 +1608,7 @@ async function handleRpmXml(
 
     // Cache miss. Rebuild and serve only if the requested hash matches a
     // current blob — this prevents serving bogus content for an old hash.
-    const snapshot = await buildRpmSnapshot(route, github, env);
+    const snapshot = await buildRpmSnapshot(route, github, cache, env);
     if (snapshot) {
       const blob = snapshot.blobs.get(hash);
       if (blob) {
@@ -1560,7 +1626,7 @@ async function handleRpmXml(
   }
 
   // Unhashed legacy path: regenerate on the fly.
-  const snapshot = await buildRpmSnapshot(route, github, env);
+  const snapshot = await buildRpmSnapshot(route, github, cache, env);
   const emptyBody = (): Uint8Array => new TextEncoder().encode(
     xmlType === 'primary' ? generatePrimaryXml([]) :
     xmlType === 'filelists' ? generateFilelistsXml([]) :

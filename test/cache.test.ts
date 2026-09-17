@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { CacheManager, type ReleaseVariant } from '../src/cache/cache';
+import { createRpmPackageEntry } from './helpers';
 
 // ============================================================================
 // Mock Cache Implementation
@@ -288,13 +289,17 @@ describe('CacheManager', () => {
   describe('cache key isolation', () => {
     it('APT Release and RPM repomd caches are separate', async () => {
       await cacheManager.setReleaseFile('owner', 'repo', variant, 'apt release');
-      await cacheManager.setRpmRepomd('owner', 'repo', variant, 'rpm repomd xml');
+      await cacheManager.setRpmSnapshot('owner', 'repo', variant, {
+        repomd: 'rpm repomd xml',
+        signature: null,
+        releaseIdsHash: 'abc',
+      });
 
       const aptRelease = await cacheManager.getReleaseFile('owner', 'repo', variant);
-      const rpmRepomd = await cacheManager.getRpmRepomd('owner', 'repo', variant);
+      const rpmSnapshot = await cacheManager.getRpmSnapshot('owner', 'repo', variant);
 
       expect(aptRelease).toBe('apt release');
-      expect(rpmRepomd).toBe('rpm repomd xml');
+      expect(rpmSnapshot?.repomd).toBe('rpm repomd xml');
     });
 
     it('Release and InRelease are separate', async () => {
@@ -355,37 +360,34 @@ describe('CacheManager', () => {
   // RPM Repomd Caching Tests
   // ==========================================================================
 
-  describe('RPM repomd.xml caching', () => {
-    it('stores and retrieves repomd.xml', async () => {
-      const content = '<?xml version="1.0"?><repomd>...</repomd>';
+  describe('RPM snapshot caching', () => {
+    it('stores and retrieves repomd.xml with its signature as one entry', async () => {
+      const snapshot = {
+        repomd: '<?xml version="1.0"?><repomd>...</repomd>',
+        signature: '-----BEGIN PGP SIGNATURE-----\n...\n-----END PGP SIGNATURE-----',
+        releaseIdsHash: '0123456789abcdef',
+      };
 
-      await cacheManager.setRpmRepomd('owner', 'repo', variant, content);
-      const result = await cacheManager.getRpmRepomd('owner', 'repo', variant);
+      await cacheManager.setRpmSnapshot('owner', 'repo', variant, snapshot);
+      const result = await cacheManager.getRpmSnapshot('owner', 'repo', variant);
 
-      expect(result).toBe(content);
+      expect(result).toEqual(snapshot);
+      expect(mockCache.size()).toBe(1);
     });
 
-    it('returns null for uncached repomd.xml', async () => {
-      const result = await cacheManager.getRpmRepomd('owner', 'repo', variant);
-
-      expect(result).toBeNull();
+    it('returns null for an uncached snapshot', async () => {
+      expect(await cacheManager.getRpmSnapshot('owner', 'repo', variant)).toBeNull();
     });
   });
 
-  describe('RPM repomd.xml.asc caching', () => {
-    it('stores and retrieves repomd.xml.asc signature', async () => {
-      const signature = '-----BEGIN PGP SIGNATURE-----\n...\n-----END PGP SIGNATURE-----';
+  describe('RPM package entry caching', () => {
+    it('stores and retrieves an entry by digest and filename', async () => {
+      const entry = createRpmPackageEntry();
 
-      await cacheManager.setRpmRepomdAsc('owner', 'repo', variant, signature);
-      const result = await cacheManager.getRpmRepomdAsc('owner', 'repo', variant);
+      await cacheManager.setRpmEntry('owner', 'repo', 'a'.repeat(64), entry.filename, entry);
 
-      expect(result).toBe(signature);
-    });
-
-    it('returns null for uncached repomd.xml.asc', async () => {
-      const result = await cacheManager.getRpmRepomdAsc('owner', 'repo', variant);
-
-      expect(result).toBeNull();
+      expect(await cacheManager.getRpmEntry('owner', 'repo', 'a'.repeat(64), entry.filename)).toEqual(entry);
+      expect(await cacheManager.getRpmEntry('owner', 'repo', 'b'.repeat(64), entry.filename)).toBeNull();
     });
   });
 
@@ -412,13 +414,15 @@ describe('CacheManager', () => {
     });
 
     it('clears repomd.xml and repomd.xml.asc for a repository', async () => {
-      await cacheManager.setRpmRepomd('owner', 'repo', variant, 'repomd xml');
-      await cacheManager.setRpmRepomdAsc('owner', 'repo', variant, 'repomd asc');
+      await cacheManager.setRpmSnapshot('owner', 'repo', variant, {
+        repomd: 'repomd xml',
+        signature: 'repomd asc',
+        releaseIdsHash: 'abc',
+      });
 
       await cacheManager.clearAllCache('owner', 'repo');
 
-      expect(await cacheManager.getRpmRepomd('owner', 'repo', variant)).toBeNull();
-      expect(await cacheManager.getRpmRepomdAsc('owner', 'repo', variant)).toBeNull();
+      expect(await cacheManager.getRpmSnapshot('owner', 'repo', variant)).toBeNull();
     });
 
     it('clears both stable and prerelease variants', async () => {

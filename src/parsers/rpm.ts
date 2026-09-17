@@ -17,6 +17,18 @@ export class RpmHeaderTruncatedError extends Error {
 }
 
 /**
+ * Thrown when the range request for an RPM header fails at the network or
+ * HTTP level. The failure says nothing about the package, so callers must
+ * retry or abort rather than drop the package from the metadata.
+ */
+export class RpmFetchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RpmFetchError';
+  }
+}
+
+/**
  * RPM Package Parser
  *
  * Extracts metadata from .rpm packages using Range Requests.
@@ -158,13 +170,17 @@ export async function extractRpmMetadata(
     headers['Authorization'] = `token ${githubToken}`;
   }
 
-  const response = await fetch(assetUrl, { headers });
-
-  if (!response.ok && response.status !== 206) {
-    throw new Error(`Failed to fetch .rpm header: ${response.status} ${response.statusText}`);
+  let buffer: ArrayBuffer;
+  try {
+    const response = await fetch(assetUrl, { headers });
+    if (!response.ok && response.status !== 206) {
+      throw new RpmFetchError(`Failed to fetch .rpm header: ${response.status} ${response.statusText}`);
+    }
+    buffer = await response.arrayBuffer();
+  } catch (err) {
+    if (err instanceof RpmFetchError) throw err;
+    throw new RpmFetchError(`Failed to fetch .rpm header: ${err instanceof Error ? err.message : String(err)}`);
   }
-
-  const buffer = await response.arrayBuffer();
   return parseRpmBuffer(buffer);
 }
 

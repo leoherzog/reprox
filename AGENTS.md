@@ -119,6 +119,13 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - Background validation refreshes cache without blocking requests
 - RPM metadata files (primary/filelists/other, both .xml and .xml.gz) are stored as **content-addressed blobs** keyed by their SHA256. `repomd.xml` references them via `<location href="repodata/{sha256}-primary.xml.gz"/>` (Fedora's `unique_md_filenames` convention). Blobs are immutable — a client holding any historical `repomd.xml` resolves its references against the exact bytes that were hashed into it, eliminating the race where background refresh could update `primary.xml.gz` between a client's `repomd.xml` fetch and its follow-up fetches.
 
+**Deterministic RPM Snapshots:**
+- The Cache API is per-colo, and a client can fetch `repomd.xml` and `repomd.xml.asc` from different colos. The signature only verifies if every colo builds byte-identical `repomd.xml` for the same release list.
+- A header fetch that fails is retried, then aborts the build with `IncompleteSnapshotError` (503 with `Retry-After`). Never drop a package because of a fetch failure, and never cache a snapshot built without one.
+- Packages are dropped only for reasons that hold in every colo: no digest, unparseable header, header past the range ladder.
+- Parsed headers are cached per asset digest, so an aborted build keeps its progress and the retry fetches only what failed.
+- `repomd.xml` and its signature share one cache entry. A background refresh that fails leaves the previous snapshot in place.
+
 **Concurrency Limiting:**
 - Cloudflare Workers has subrequest limits (50 free tier, 1000 paid)
 - `mapWithConcurrencyFiltered()` processes assets with limited parallelism (default: 30)
@@ -142,9 +149,9 @@ All cache keys include the release variant for proper isolation:
 | APT Release.gpg | `release-gpg/{variant}/{owner}/{repo}` |
 | Release IDs Hash | `release-ids-hash/{variant}/{owner}/{repo}` |
 | Asset URL | `asset-url/{variant}/{owner}/{repo}/{releaseHash}/{filename}` |
-| RPM Repomd | `rpm/repomd/{variant}/{owner}/{repo}` |
-| RPM Repomd.asc | `rpm/repomd-asc/{variant}/{owner}/{repo}` |
+| RPM Snapshot (repomd.xml + signature + release IDs hash, one entry) | `rpm/snapshot/{variant}/{owner}/{repo}` |
 | RPM Blob (content-addressed) | `rpm/blob/{variant}/{owner}/{repo}/{sha256}` |
+| RPM Package Entry (parsed header, keyed by asset digest) | `rpm/entry/{owner}/{repo}/{sha256}/{filename}` |
 
 The legacy `binary-{arch}/Packages[.gz]` URL has no dedicated mutable key — `handlePackages`/`handlePackagesGz` parses the current cached `Release`, extracts the SHA256 for the requested path, and serves the content-addressed blob. This inherits the blob cache's immutability: a concurrent refresh producing a newer Release cannot corrupt in-flight client responses.
 

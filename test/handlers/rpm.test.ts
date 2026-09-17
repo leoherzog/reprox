@@ -165,6 +165,71 @@ describe('handleRepomd', () => {
 });
 
 // ============================================================================
+// Incomplete Snapshot Tests
+// ============================================================================
+
+describe('handleRepomd - header fetch failures', () => {
+  const DIGEST_ASSET = createMockGitHubAsset({
+    name: 'test-app-1.0.0-1.x86_64.rpm',
+    size: 75000,
+    browser_download_url: 'https://github.com/owner/repo/releases/download/v1.0.0/test-app-1.0.0-1.x86_64.rpm',
+    digest: `sha256:${'a'.repeat(64)}`,
+  });
+
+  /** Mock GitHub so the first `failures` header fetches return 500. */
+  function mockFlakyAssetFetch(failures: number) {
+    const release = createMockGitHubRelease({ id: 777, assets: [DIGEST_ASSET] });
+    let assetFetches = 0;
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      const urlStr = url.toString();
+      if (urlStr.includes('api.github.com')) {
+        return new Response(JSON.stringify([release]), { status: 200 });
+      }
+      if (++assetFetches <= failures) {
+        return new Response('upstream error', { status: 500 });
+      }
+      return new Response(new ArrayBuffer(256), { status: 206 });
+    });
+    return () => assetFetches;
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns 503 and caches nothing when a header fetch keeps failing', async () => {
+    const env = createMockEnv();
+    mockFlakyAssetFetch(Infinity);
+
+    const url = 'https://example.com/owner/flaky-hard/repodata/repomd.xml';
+    const failed = await fetchAndFlush(new Request(url), env, createMockExecutionContext());
+
+    expect(failed.status).toBe(503);
+    expect(failed.headers.get('Retry-After')).toBe('5');
+
+    mockFlakyAssetFetch(0);
+    const recovered = await fetchAndFlush(new Request(url), env, createMockExecutionContext());
+
+    expect(recovered.status).toBe(200);
+  });
+
+  it('retries a failed header fetch', async () => {
+    const env = createMockEnv();
+    const assetFetches = mockFlakyAssetFetch(1);
+
+    const request = new Request('https://example.com/owner/flaky-once/repodata/repomd.xml');
+    const response = await fetchAndFlush(request, env, createMockExecutionContext());
+
+    expect(response.status).toBe(200);
+    expect(assetFetches()).toBe(2);
+  });
+});
+
+// ============================================================================
 // handleRepomdAsc Tests
 // ============================================================================
 
