@@ -1,6 +1,6 @@
 name = "reprox"
 main = "src/index.ts"
-compatibility_date = "2026-09-17"
+compatibility_date = "2026-10-27"
 
 # Environment variables (set via wrangler secret)
 # GPG_PRIVATE_KEY - ASCII armored private key for signing
