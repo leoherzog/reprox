@@ -16,6 +16,10 @@ const KV_GET_BATCH = 25;
 const FETCH_ATTEMPTS = 3;
 const FETCH_BACKOFF_MS = 250;
 
+// Headers stored together get spread-out expiries, so they are not all refetched in one burst.
+const ENTRY_TTL_SECONDS = 365 * 86400;
+const ENTRY_TTL_JITTER_SECONDS = 30 * 86400;
+
 /**
  * Thrown when a package header could not be fetched. Metadata built without
  * that package would differ from metadata built elsewhere for the same
@@ -114,7 +118,9 @@ export async function loadHeaders<T>(
     }
     if (header === null) return;
     headers.set(key, header);
-    await kv.put(key, JSON.stringify(header)).catch(error => console.error(`Failed to store ${key}:`, error));
+    const expirationTtl = ENTRY_TTL_SECONDS + Math.floor(Math.random() * ENTRY_TTL_JITTER_SECONDS);
+    await kv.put(key, JSON.stringify(header), { expirationTtl })
+      .catch(error => console.error(`Failed to store ${key}:`, error));
   });
 
   if (failed.length > 0) throw new IncompleteSnapshotError(failed);

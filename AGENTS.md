@@ -126,6 +126,7 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - A value is the parser output alone (`RpmHeaderData` or `DebianControlData`), a pure function of the asset bytes, keyed `{rpm|deb}/v{n}/{sha256}`. Filename, size, checksum, pool path and the filename arch fallback come from the asset at build time and are never stored.
 - Bump the version in `KEY_PREFIXES` after a parser change; old entries are then ignored.
 - Only successful parses are stored. A failed fetch or an unusable header (unparseable, past the range ladder) stores nothing, so the next build tries again.
+- Entries expire after a year plus up to 30 days of random spread, so headers stored together are not refetched in one burst. The next build that needs an expired header fetches and stores it again. Entries for deleted releases and old `KEY_PREFIXES` versions age out the same way.
 - Reads are bulk `get()` calls of 25 keys with the default `cacheTtl`. KV caches misses too, so a longer `cacheTtl` would hide headers another colo has just stored.
 - A bulk `get()` over KV's 25 MB response limit fails with 413, which large RPM headers reach. A failed batch is read again one key per `get()`, and only a key whose own read fails counts as a miss.
 

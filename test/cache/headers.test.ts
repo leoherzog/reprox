@@ -81,6 +81,17 @@ describe('loadHeaders', () => {
     vi.restoreAllMocks();
   });
 
+  it('stores a header to expire after a year plus up to a month', async () => {
+    const a = asset('expiring.deb', '9');
+    const now = Date.now() / 1000;
+
+    await loadHeaders(kv, 'deb', [a], async () => ({ package: 'expiring' }));
+
+    const { keys: [stored] } = await kv.list({ prefix: `deb/v1/${'9'.repeat(64)}` });
+    expect(stored.expiration).toBeGreaterThanOrEqual(Math.floor(now) + 365 * 86400);
+    expect(stored.expiration).toBeLessThanOrEqual(Math.ceil(now) + 395 * 86400);
+  });
+
   it('fetches assets that share a digest once', async () => {
     const a = asset('same_amd64.deb', '7');
     const b = asset('same-renamed_amd64.deb', '7');
