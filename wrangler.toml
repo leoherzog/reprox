@@ -10,6 +10,10 @@ compatibility_date = "2026-09-17"
 # Default cache TTL in seconds (24 hours)
 CACHE_TTL = "86400"
 
+# Parsed package headers, shared by every colo. Created on first deploy.
+[[kv_namespaces]]
+binding = "ENTRIES"
+
 [placement]
 mode = "smart"
 

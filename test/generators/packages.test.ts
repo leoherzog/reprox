@@ -5,7 +5,10 @@ import {
   filterDebAssets,
   filterByArchitecture,
   fetchDebMetadata,
+  buildPackageEntry,
 } from '../../src/generators/packages';
+import { parseControlFile } from '../../src/parsers/deb';
+import { HeaderFetchError } from '../../src/utils/fetch';
 import type { PackageEntry, DebianControlData, GitHubAsset } from '../../src/types';
 
 // ============================================================================
@@ -346,26 +349,24 @@ describe('fetchDebMetadata', () => {
     vi.unstubAllGlobals();
   });
 
-  it('throws descriptive error on HTTP failure', async () => {
+  it('throws HeaderFetchError on HTTP failure', async () => {
     vi.mocked(fetch).mockResolvedValue({
       ok: false,
       status: 403,
       statusText: 'Forbidden',
     } as Response);
 
-    await expect(fetchDebMetadata('https://example.com/test.deb'))
-      .rejects.toThrow('Failed to fetch .deb: 403 Forbidden');
+    const result = fetchDebMetadata('https://example.com/test.deb');
+    await expect(result).rejects.toThrow(HeaderFetchError);
+    await expect(result).rejects.toThrow('403 Forbidden');
   });
 
-  it('throws on 404 not found', async () => {
-    vi.mocked(fetch).mockResolvedValue({
-      ok: false,
-      status: 404,
-      statusText: 'Not Found',
-    } as Response);
+  it('throws HeaderFetchError on a network error', async () => {
+    vi.mocked(fetch).mockRejectedValue(new TypeError('Network connection lost'));
 
-    await expect(fetchDebMetadata('https://example.com/test.deb'))
-      .rejects.toThrow('Failed to fetch .deb: 404 Not Found');
+    const result = fetchDebMetadata('https://example.com/test.deb');
+    await expect(result).rejects.toThrow(HeaderFetchError);
+    await expect(result).rejects.toThrow('Network connection lost');
   });
 
   it('includes auth token in headers when provided', async () => {
@@ -410,22 +411,65 @@ describe('fetchDebMetadata', () => {
         headers: expect.objectContaining({
           Range: 'bytes=0-65535',
         }),
-        redirect: 'follow',
       })
     );
   });
 
-  it('accepts 206 Partial Content as success', async () => {
-    // Create a minimal valid .deb-like buffer (will fail parsing but proves status handling)
-    vi.mocked(fetch).mockResolvedValue({
-      ok: true, // 206 is in 200-299 range, so ok=true per Fetch spec
-      status: 206,
-      statusText: 'Partial Content',
-      arrayBuffer: () => Promise.resolve(new ArrayBuffer(100)),
-    } as Response);
+  it('accepts 206 Partial Content, so an unparseable body is a parse error', async () => {
+    vi.mocked(fetch).mockResolvedValue(new Response(new ArrayBuffer(100), { status: 206 }));
 
-    // Will fail on parsing, but should not fail on status check
-    await expect(fetchDebMetadata('https://example.com/test.deb'))
-      .rejects.not.toThrow('Failed to fetch .deb: 206');
+    const error = await fetchDebMetadata('https://example.com/test.deb').catch(e => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(HeaderFetchError);
+  });
+});
+
+// ============================================================================
+// buildPackageEntry Tests
+// ============================================================================
+
+describe('buildPackageEntry', () => {
+  const asset: GitHubAsset = {
+    id: 1,
+    name: 'tool_2.1.0_arm64.deb',
+    size: 4242,
+    browser_download_url: 'https://example.com/tool_2.1.0_arm64.deb',
+    digest: `sha256:${'c'.repeat(64)}`,
+  };
+
+  it('attaches filename, size and checksum from the asset', () => {
+    const entry = buildPackageEntry(asset, createControlData({ package: 'tool', architecture: 'arm64' }));
+
+    expect(entry.filename).toBe('pool/main/t/tool/tool_2.1.0_arm64.deb');
+    expect(entry.size).toBe(4242);
+    expect(entry.sha256).toBe('c'.repeat(64));
+  });
+
+  it('takes the filename architecture over "all" without mutating the control data', () => {
+    const controlData = createControlData({ package: 'tool', architecture: 'all' });
+
+    const entry = buildPackageEntry(asset, controlData);
+
+    expect(entry.controlData.architecture).toBe('arm64');
+    expect(controlData.architecture).toBe('all');
+  });
+
+  it('renders identical Packages bytes from control data that went through JSON', () => {
+    const controlData = parseControlFile([
+      'Package: tool',
+      'Version: 2.1.0',
+      'Architecture: all',
+      'Maintainer: Dev <dev@example.com>',
+      'Installed-Size: unknown',
+      'Depends: libc6 (>= 2.34)',
+      'Description: A tool',
+      ' Longer text.',
+      ' .',
+      ' More text.',
+    ].join('\n'));
+    const roundTripped = JSON.parse(JSON.stringify(controlData)) as DebianControlData;
+
+    expect(generatePackagesFile([buildPackageEntry(asset, roundTripped)]))
+      .toBe(generatePackagesFile([buildPackageEntry(asset, controlData)]));
   });
 });

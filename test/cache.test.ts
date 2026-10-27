@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { CacheManager, type ReleaseVariant } from '../src/cache/cache';
-import { createRpmPackageEntry } from './helpers';
 
 // ============================================================================
 // Mock Cache Implementation
@@ -377,17 +376,6 @@ describe('CacheManager', () => {
 
     it('returns null for an uncached snapshot', async () => {
       expect(await cacheManager.getRpmSnapshot('owner', 'repo', variant)).toBeNull();
-    });
-  });
-
-  describe('RPM package entry caching', () => {
-    it('stores and retrieves an entry by digest and filename', async () => {
-      const entry = createRpmPackageEntry();
-
-      await cacheManager.setRpmEntry('owner', 'repo', 'a'.repeat(64), entry.filename, entry);
-
-      expect(await cacheManager.getRpmEntry('owner', 'repo', 'a'.repeat(64), entry.filename)).toEqual(entry);
-      expect(await cacheManager.getRpmEntry('owner', 'repo', 'b'.repeat(64), entry.filename)).toBeNull();
     });
   });
 

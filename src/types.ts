@@ -7,6 +7,7 @@ export interface Env {
   GPG_PUBLIC_KEY?: string;
   GITHUB_TOKEN?: string;
   CACHE_TTL?: string;
+  ENTRIES: KVNamespace; // parsed package header store
 }
 
 /**

@@ -120,6 +120,8 @@ npx wrangler secret put GITHUB_TOKEN
 npm run deploy
 ```
 
+The first deploy creates the `ENTRIES` KV namespace, which stores parsed package headers.
+
 To update manually:
 ```bash
 # git clone git@github.com:leoherzog/reprox.git

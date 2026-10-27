@@ -5,9 +5,12 @@ import {
   generateFilelistsXml,
   generateOtherXml,
   filterRpmAssets,
+  fetchRpmMetadata,
   buildRpmPackageEntry,
   type RepomdFileInfo,
 } from '../../src/generators/repodata';
+import { parseRpmBuffer } from '../../src/parsers/rpm';
+import { HeaderFetchError } from '../../src/utils/fetch';
 import type { RpmPackageEntry, RpmHeaderData, GitHubAsset } from '../../src/types';
 import { gzipCompress } from '../../src/utils/crypto';
 
@@ -785,7 +788,7 @@ describe('repodata integration', () => {
 });
 
 // ============================================================================
-// buildRpmPackageEntry truncation / retry tests
+// fetchRpmMetadata truncation / retry tests
 // ============================================================================
 
 /**
@@ -866,7 +869,7 @@ function buildMinimalRpm(
   return out;
 }
 
-describe('buildRpmPackageEntry range retry on truncation', () => {
+describe('fetchRpmMetadata range retry on truncation', () => {
   beforeEach(() => { vi.stubGlobal('fetch', vi.fn()); });
   afterEach(() => { vi.unstubAllGlobals(); });
 
@@ -898,9 +901,9 @@ describe('buildRpmPackageEntry range retry on truncation', () => {
       return new Response(slice, { status: 206 });
     });
 
-    const entry = await buildRpmPackageEntry(asset);
-    expect(entry).not.toBeNull();
-    expect(entry!.headerData.name).toBe('big-pkg');
+    const headerData = await fetchRpmMetadata(asset.browser_download_url);
+    expect(headerData).not.toBeNull();
+    expect(headerData!.name).toBe('big-pkg');
     // Should have retried at least twice (256KB truncated, 1MB succeeded).
     expect(vi.mocked(fetch).mock.calls.length).toBeGreaterThanOrEqual(2);
   });
@@ -929,10 +932,77 @@ describe('buildRpmPackageEntry range retry on truncation', () => {
     vi.mocked(fetch).mockImplementation(async () => new Response(rpm, { status: 206 }));
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    const entry = await buildRpmPackageEntry(asset);
-    expect(entry).toBeNull();
+    const headerData = await fetchRpmMetadata(asset.browser_download_url);
+    expect(headerData).toBeNull();
     expect(vi.mocked(fetch).mock.calls.length).toBe(3); // 256KB, 1MB, 4MB
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it('throws HeaderFetchError when a range request fails', async () => {
+    vi.mocked(fetch).mockImplementation(async () => new Response('rate limited', { status: 429 }));
+
+    await expect(fetchRpmMetadata(asset.browser_download_url)).rejects.toThrow(HeaderFetchError);
+  });
+});
+
+// ============================================================================
+// buildRpmPackageEntry tests
+// ============================================================================
+
+describe('buildRpmPackageEntry', () => {
+  const asset: GitHubAsset = {
+    id: 1,
+    name: 'tool-2.1-1.aarch64.rpm',
+    size: 4242,
+    browser_download_url: 'https://example.com/tool-2.1-1.aarch64.rpm',
+    digest: `sha256:${'d'.repeat(64)}`,
+  };
+
+  it('attaches filename, size and checksum from the asset', () => {
+    const entry = buildRpmPackageEntry(asset, createRpmHeaderData());
+
+    expect(entry.filename).toBe('tool-2.1-1.aarch64.rpm');
+    expect(entry.size).toBe(4242);
+    expect(entry.checksum).toBe('d'.repeat(64));
+    expect(entry.checksumType).toBe('sha256');
+  });
+
+  it('falls back to the filename arch without mutating the header', () => {
+    const headerData = createRpmHeaderData({ arch: '' });
+
+    const entry = buildRpmPackageEntry(asset, headerData);
+
+    expect(entry.headerData.arch).toBe('aarch64');
+    expect(headerData.arch).toBe('');
+  });
+
+  it('renders identical XML from a header that went through JSON', async () => {
+    const rpm = buildMinimalRpm([
+      { tag: 1000, type: 6, value: 'tool' },
+      { tag: 1001, type: 6, value: '2.1' },
+      { tag: 1002, type: 6, value: '1' },
+      { tag: 1022, type: 6, value: 'aarch64' },
+      { tag: 1004, type: 6, value: 'Summary with <xml> & entities' },
+      { tag: 1006, type: 4, value: 1700000000 },
+      { tag: 1049, type: 8, value: ['libc.so.6', 'rpmlib(PayloadIsZstd)'] },
+      { tag: 1048, type: 4, value: [0, 0x1000008] },
+      { tag: 1050, type: 8, value: ['', '5.4.18-1'] },
+      { tag: 1117, type: 8, value: ['tool', 'tool.conf'] },
+      { tag: 1118, type: 8, value: ['/usr/bin/', '/etc/'] },
+      { tag: 1116, type: 4, value: [0, 1] },
+      { tag: 1080, type: 4, value: [1690000000, 1680000000] },
+      { tag: 1081, type: 8, value: ['Dev <dev@example.com> - 2.1-1', 'Dev - 2.0-1'] },
+      { tag: 1082, type: 8, value: ['- Release 2.1', '- Release 2.0'] },
+    ]);
+    const headerData = parseRpmBuffer(rpm.buffer as ArrayBuffer);
+    const roundTripped = JSON.parse(JSON.stringify(headerData)) as RpmHeaderData;
+
+    expect(roundTripped).toStrictEqual(headerData);
+    const fresh = [buildRpmPackageEntry(asset, headerData)];
+    const stored = [buildRpmPackageEntry(asset, roundTripped)];
+    expect(generatePrimaryXml(stored)).toBe(generatePrimaryXml(fresh));
+    expect(generateFilelistsXml(stored)).toBe(generateFilelistsXml(fresh));
+    expect(generateOtherXml(stored)).toBe(generateOtherXml(fresh));
   });
 });

@@ -17,18 +17,6 @@ export class RpmHeaderTruncatedError extends Error {
 }
 
 /**
- * Thrown when the range request for an RPM header fails at the network or
- * HTTP level. The failure says nothing about the package, so callers must
- * retry or abort rather than drop the package from the metadata.
- */
-export class RpmFetchError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'RpmFetchError';
-  }
-}
-
-/**
  * RPM Package Parser
  *
  * Extracts metadata from .rpm packages using Range Requests.
@@ -146,42 +134,6 @@ function normalizeToNumberArray(value: string | number | string[] | number[] | u
   if (value === undefined) return [];
   if (Array.isArray(value)) return value.map(v => Number(v));
   return [Number(value)];
-}
-
-// Default range request size for RPM headers (file lists can push past this)
-export const RPM_DEFAULT_RANGE_SIZE = 262144; // 256KB
-
-/**
- * Extract metadata from an RPM package URL using Range Request.
- * The caller may override `rangeSize` to retry with a larger window when the
- * parser reports truncation (see RpmHeaderTruncatedError).
- */
-export async function extractRpmMetadata(
-  assetUrl: string,
-  githubToken?: string,
-  rangeSize: number = RPM_DEFAULT_RANGE_SIZE
-): Promise<RpmHeaderData> {
-  const headers: HeadersInit = {
-    Range: `bytes=0-${rangeSize - 1}`,
-    Accept: 'application/octet-stream',
-  };
-
-  if (githubToken) {
-    headers['Authorization'] = `token ${githubToken}`;
-  }
-
-  let buffer: ArrayBuffer;
-  try {
-    const response = await fetch(assetUrl, { headers });
-    if (!response.ok && response.status !== 206) {
-      throw new RpmFetchError(`Failed to fetch .rpm header: ${response.status} ${response.statusText}`);
-    }
-    buffer = await response.arrayBuffer();
-  } catch (err) {
-    if (err instanceof RpmFetchError) throw err;
-    throw new RpmFetchError(`Failed to fetch .rpm header: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return parseRpmBuffer(buffer);
 }
 
 /**

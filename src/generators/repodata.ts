@@ -14,14 +14,15 @@
 
 import type { RpmPackageEntry, RpmHeaderData, GitHubAsset } from '../types';
 import { sha256, gzipCompress } from '../utils/crypto';
-import { extractRpmMetadata, RpmHeaderTruncatedError, RPM_DEFAULT_RANGE_SIZE } from '../parsers/rpm';
+import { parseRpmBuffer, RpmHeaderTruncatedError } from '../parsers/rpm';
+import { fetchRange } from '../utils/fetch';
 import { extractRpmArchFromFilename } from '../utils/architectures';
 import { escapeXml } from '../utils/xml';
 
 // Retry ladder for oversized RPM headers. 256KB fits the overwhelming
 // majority; the jumps handle packages with enormous file lists. We cap at 4MB
 // to avoid pulling the entire payload; anything bigger is dropped with a warn.
-const RPM_RANGE_RETRY_LADDER = [RPM_DEFAULT_RANGE_SIZE, 1024 * 1024, 4 * 1024 * 1024];
+const RPM_RANGE_RETRY_LADDER = [256 * 1024, 1024 * 1024, 4 * 1024 * 1024];
 
 /**
  * Metadata file info for repomd.xml generation
@@ -317,47 +318,37 @@ ${changelogXml}
 }
 
 /**
- * Build an RpmPackageEntry from a GitHub asset
- * Uses GitHub's digest field for the checksum when available.
- *
- * Retries with progressively larger range requests when the RPM header
- * exceeds the fetched window (large file lists); returns null past the cap.
+ * Fetch and parse an RPM header, retrying with progressively larger range
+ * requests when the header exceeds the fetched window (large file lists).
+ * @returns the header, or null when it exceeds the largest range
+ * @throws HeaderFetchError when a range request failed
  */
-export async function buildRpmPackageEntry(
-  asset: GitHubAsset,
+export async function fetchRpmMetadata(
+  downloadUrl: string,
   githubToken?: string
-): Promise<RpmPackageEntry | null> {
-  let headerData: RpmHeaderData | undefined;
+): Promise<RpmHeaderData | null> {
   for (const size of RPM_RANGE_RETRY_LADDER) {
     try {
-      headerData = await extractRpmMetadata(asset.browser_download_url, githubToken, size);
-      break;
+      return parseRpmBuffer(await fetchRange(downloadUrl, size, githubToken));
     } catch (err) {
-      if (err instanceof RpmHeaderTruncatedError) continue;
-      throw err;
+      if (!(err instanceof RpmHeaderTruncatedError)) throw err;
     }
   }
-  if (!headerData) {
-    console.warn(`RPM header exceeds ${RPM_RANGE_RETRY_LADDER[RPM_RANGE_RETRY_LADDER.length - 1]} bytes; dropping ${asset.browser_download_url}`);
-    return null;
-  }
+  console.warn(`RPM header exceeds ${RPM_RANGE_RETRY_LADDER[RPM_RANGE_RETRY_LADDER.length - 1]} bytes; dropping ${downloadUrl}`);
+  return null;
+}
 
-  // Override arch from filename if header doesn't have it
-  if (!headerData.arch || headerData.arch === '') {
-    headerData.arch = extractRpmArchFromFilename(asset.name);
-  }
-
-  // Extract SHA256 from GitHub's digest field (format: "sha256:...")
-  let checksum = '';
-  if (asset.digest?.startsWith('sha256:')) {
-    checksum = asset.digest.slice(7); // Remove "sha256:" prefix
-  }
-
+/**
+ * Build an RpmPackageEntry from a GitHub asset and its parsed header.
+ * Uses GitHub's digest field for the checksum when available.
+ */
+export function buildRpmPackageEntry(asset: GitHubAsset, headerData: RpmHeaderData): RpmPackageEntry {
   return {
-    headerData,
+    // Fall back to the filename's arch when the header has none
+    headerData: headerData.arch ? headerData : { ...headerData, arch: extractRpmArchFromFilename(asset.name) },
     filename: asset.name,
     size: asset.size,
-    checksum,
+    checksum: asset.digest?.startsWith('sha256:') ? asset.digest.slice(7) : '',
     checksumType: 'sha256',
   };
 }

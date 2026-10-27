@@ -1,9 +1,10 @@
-import type { Env, RouteInfo, PackageEntry, RpmPackageEntry, GitHubRelease, GitHubAsset } from './types';
+import type { Env, RouteInfo, GitHubRelease, GitHubAsset } from './types';
 import { GitHubClient, getArchitecturesFromAssets, githubHeaders } from './github/api';
 import { CacheManager, createCacheManager, computeReleaseIdsHash, type ReleaseVariant } from './cache/cache';
-import { mapWithConcurrencyFiltered } from './utils/concurrency';
+import { loadHeaders, IncompleteSnapshotError } from './cache/headers';
 import {
   generatePackagesFile,
+  fetchDebMetadata,
   buildPackageEntry,
   filterDebAssets,
   filterByArchitecture,
@@ -18,11 +19,11 @@ import {
   generatePrimaryXml,
   generateFilelistsXml,
   generateOtherXml,
+  fetchRpmMetadata,
   buildRpmPackageEntry,
   filterRpmAssets,
 } from './generators/repodata';
 import type { RepomdHashes } from './generators/repodata';
-import { RpmFetchError } from './parsers/rpm';
 import { signCleartext, signDetached, signDetachedBinary, extractPublicKey, getKeyFingerprint } from './signing/gpg';
 import { gzipCompress, sha256 } from './utils/crypto';
 import { README_HTML, README_MARKDOWN } from './generated/readme-html';
@@ -575,22 +576,17 @@ async function handleInRelease(
 ): Promise<Response> {
   const { owner, repo, releaseVariant } = route;
 
-  // Check cache first - avoid GitHub API call if possible
-  const cachedHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
-  if (cachedHash) {
-    const cachedInRelease = await cache.getInReleaseFile(owner, repo, releaseVariant);
-    if (cachedInRelease) {
-      // Verify cache is still valid by checking GitHub (but we already have content to serve)
-      // Do validation in background to not block response
-      ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
-
-      return new Response(cachedInRelease, {
-        headers: {
-          'Content-Type': 'text/plain',
-          'Cache-Control': 'public, max-age=300',
-        },
-      });
-    }
+  // Not gated on the release IDs hash: its 5-minute TTL would turn a failed
+  // background refresh into a 503 while a valid InRelease is cached.
+  const cachedInRelease = await cache.getInReleaseFile(owner, repo, releaseVariant);
+  if (cachedInRelease) {
+    ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
+    return new Response(cachedInRelease, {
+      headers: {
+        'Content-Type': 'text/plain',
+        'Cache-Control': 'public, max-age=300',
+      },
+    });
   }
 
   // No cache - generate fresh content
@@ -633,20 +629,15 @@ async function handleRelease(
 ): Promise<Response> {
   const { owner, repo, releaseVariant } = route;
 
-  // Check cache first
-  const cachedHash = await cache.getReleaseIdsHash(owner, repo, releaseVariant);
-  if (cachedHash) {
-    const cachedRelease = await cache.getReleaseFile(owner, repo, releaseVariant);
-    if (cachedRelease) {
-      ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
-
-      return new Response(cachedRelease, {
-        headers: {
-          'Content-Type': 'text/plain',
-          'Cache-Control': 'public, max-age=300',
-        },
-      });
-    }
+  const cachedRelease = await cache.getReleaseFile(owner, repo, releaseVariant);
+  if (cachedRelease) {
+    ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
+    return new Response(cachedRelease, {
+      headers: {
+        'Content-Type': 'text/plain',
+        'Cache-Control': 'public, max-age=300',
+      },
+    });
   }
 
   const releaseContent = await generateReleaseContent(route, github, cache, env, ctx);
@@ -764,50 +755,17 @@ async function generateReleaseContent(
     throw new Error(`No releases found for ${owner}/${repo}`);
   }
 
-  // Aggregate assets from all releases
-  const allAssets = aggregateAssets(releases);
-
-  // Detect architectures from available assets
-  const debAssets = filterDebAssets(allAssets);
-  const architectures = getArchitecturesFromAssets(debAssets);
-
-  // Generate Packages content for all architectures in parallel
-  const packagesContentByArch = new Map<string, string>();
-
-  const archResults = await Promise.all(
-    architectures.map(async (arch) => {
-      const archAssets = filterByArchitecture(debAssets, arch);
-      if (archAssets.length === 0) return null;
-
-      const packages = await generatePackagesContentMultiRelease(
-        owner,
-        repo,
-        archAssets,
-        env.GITHUB_TOKEN
-      );
-
-      const content = generatePackagesFile(packages);
-      return { arch, content };
-    })
-  );
+  const packagesContentByArch = await generatePackagesByArch(aggregateAssets(releases), env);
 
   // Write content-addressed blobs FIRST (before any Release bytes escape).
   // Awaited so the blobs exist by the time the caller signs/returns the
   // Release file.
-  const filteredResults = archResults.filter(
-    (result): result is { arch: string; content: string } => result !== null
-  );
-  await Promise.all(
-    filteredResults.map(async ({ arch, content }) => {
-      packagesContentByArch.set(arch, content);
-      await writeAptPackagesBlobs(cache, owner, repo, releaseVariant, content);
-    })
-  );
+  await writeAptPackagesBlobs(cache, owner, repo, releaseVariant, packagesContentByArch);
 
   // Build Release config with detected architectures and most recent release timestamp
   const config = {
     ...defaultReleaseConfig(owner, repo),
-    architectures: architectures,
+    architectures: [...packagesContentByArch.keys()],
     date: mostRecentReleaseDate(releases),
   };
 
@@ -822,9 +780,28 @@ async function generateReleaseContent(
 }
 
 /**
- * Write the two content-addressed APT Packages blobs for a single
- * architecture (uncompressed + gzipped), each keyed by its own SHA256. Blobs
- * are immutable; the legacy `binary-{arch}/Packages[.gz]` URL serves them by
+ * Generate the Packages file for every architecture found in the assets.
+ * @throws IncompleteSnapshotError when any header fetch failed
+ */
+async function generatePackagesByArch(assets: GitHubAsset[], env: Env): Promise<Map<string, string>> {
+  const debAssets = filterDebAssets(assets);
+  const controlData = await loadHeaders(env.ENTRIES, 'deb', debAssets, url => fetchDebMetadata(url, env.GITHUB_TOKEN));
+
+  const packagesContentByArch = new Map<string, string>();
+  for (const arch of getArchitecturesFromAssets(debAssets)) {
+    const packages = filterByArchitecture(debAssets, arch).flatMap(asset => {
+      const data = controlData.get(asset);
+      return data ? [buildPackageEntry(asset, data)] : [];
+    });
+    packagesContentByArch.set(arch, generatePackagesFile(packages));
+  }
+  return packagesContentByArch;
+}
+
+/**
+ * Write the two content-addressed APT Packages blobs for each architecture
+ * (uncompressed + gzipped), each keyed by its own SHA256. Blobs are
+ * immutable; the legacy `binary-{arch}/Packages[.gz]` URL serves them by
  * reading the current Release's SHA256 and doing a blob lookup.
  */
 async function writeAptPackagesBlobs(
@@ -832,15 +809,17 @@ async function writeAptPackagesBlobs(
   owner: string,
   repo: string,
   variant: ReleaseVariant,
-  content: string
+  packagesContentByArch: Map<string, string>
 ): Promise<void> {
-  const bytes = new TextEncoder().encode(content);
-  const gz = await gzipCompress(bytes);
-  const [contentSha, gzSha] = await Promise.all([sha256(bytes), sha256(gz)]);
-  await Promise.all([
-    cache.setPackagesBlob(owner, repo, variant, contentSha, bytes, 'text/plain'),
-    cache.setPackagesBlob(owner, repo, variant, gzSha, gz, 'application/gzip'),
-  ]);
+  await Promise.all(Array.from(packagesContentByArch.values(), async (content) => {
+    const bytes = new TextEncoder().encode(content);
+    const gz = await gzipCompress(bytes);
+    const [contentSha, gzSha] = await Promise.all([sha256(bytes), sha256(gz)]);
+    await Promise.all([
+      cache.setPackagesBlob(owner, repo, variant, contentSha, bytes, 'text/plain'),
+      cache.setPackagesBlob(owner, repo, variant, gzSha, gz, 'application/gzip'),
+    ]);
+  }));
 }
 
 /**
@@ -874,43 +853,16 @@ async function generateAndCacheAll(
   // Cache all asset URLs for efficient binary redirects (keyed by release hash for auto-invalidation)
   await cache.setAssetUrls(owner, repo, releaseVariant, releaseHash, allAssets);
 
-  const debAssets = filterDebAssets(allAssets);
-  const architectures = getArchitecturesFromAssets(debAssets);
-  const packagesContentByArch = new Map<string, string>();
-
-  // Generate Packages content for all architectures in parallel
-  const archResults = await Promise.all(
-    architectures.map(async (arch) => {
-      const archAssets = filterByArchitecture(debAssets, arch);
-      if (archAssets.length === 0) return null;
-
-      const packages = await generatePackagesContentMultiRelease(
-        owner,
-        repo,
-        archAssets,
-        env.GITHUB_TOKEN
-      );
-
-      const content = generatePackagesFile(packages);
-      return { arch, content };
-    })
-  );
+  const packagesContentByArch = await generatePackagesByArch(allAssets, env);
 
   // Write content-addressed blobs BEFORE Release bytes are persisted. Blob
   // writes are awaited so a subsequent read of the cached Release always
   // resolves its references.
-  await Promise.all(
-    archResults
-      .filter((result): result is { arch: string; content: string } => result !== null)
-      .map(async ({ arch, content }) => {
-        packagesContentByArch.set(arch, content);
-        await writeAptPackagesBlobs(cache, owner, repo, releaseVariant, content);
-      })
-  );
+  await writeAptPackagesBlobs(cache, owner, repo, releaseVariant, packagesContentByArch);
 
   const config = {
     ...defaultReleaseConfig(owner, repo),
-    architectures: architectures,
+    architectures: [...packagesContentByArch.keys()],
     date: mostRecentReleaseDate(releases),
   };
 
@@ -922,11 +874,13 @@ async function generateAndCacheAll(
   await cache.setReleaseFile(owner, repo, releaseVariant, releaseContent);
   await cache.setReleaseIdsHash(owner, repo, releaseVariant, releaseHash);
 
-  if (env.GPG_PRIVATE_KEY) {
-    const inRelease = await signCleartext(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
-    await cache.setInReleaseFile(owner, repo, releaseVariant, inRelease);
+  // Unsigned without a key, as handleInRelease serves it.
+  const inRelease = env.GPG_PRIVATE_KEY
+    ? await signCleartext(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE)
+    : releaseContent;
+  await cache.setInReleaseFile(owner, repo, releaseVariant, inRelease);
 
-    // Also cache Release.gpg for consistency
+  if (env.GPG_PRIVATE_KEY) {
     const releaseGpg = await signDetached(releaseContent, env.GPG_PRIVATE_KEY, env.GPG_PASSPHRASE);
     await cache.setReleaseGpgSignature(owner, repo, releaseVariant, releaseGpg);
   }
@@ -1063,24 +1017,8 @@ async function servePackagesFromBlob(
   const emptyBody: BodyInit = gz ? await gzipCompress('') : '';
   const emptyHeaders = { 'Content-Type': contentType, 'Cache-Control': 'public, max-age=300' };
 
-  // Cached Release → parse → blob lookup. Kick off a background validation
-  // so the next request sees fresh data.
-  let releaseContent = await cache.getReleaseFile(owner, repo, releaseVariant);
-  let refreshed = false;
-
-  if (!releaseContent) {
-    // Cold cache: generate Release (which also writes blobs) and cache it.
-    try {
-      releaseContent = await generateReleaseContent(route, github, cache, env, ctx);
-      ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseVariant, releaseContent));
-      refreshed = true;
-    } catch {
-      return new Response(emptyBody, { headers: emptyHeaders });
-    }
-  }
-
-  const findAndFetch = async (): Promise<Response | null> => {
-    const sha = findPackagesSha(releaseContent!, component, architecture, gz);
+  const findAndFetch = async (releaseContent: string): Promise<Response | null> => {
+    const sha = findPackagesSha(releaseContent, component, architecture, gz);
     if (!sha) return null;
     const blob = await cache.getPackagesBlob(owner, repo, releaseVariant, sha);
     if (!blob) return null;
@@ -1092,52 +1030,29 @@ async function servePackagesFromBlob(
     });
   };
 
-  let response = await findAndFetch();
-
-  if (!response && !refreshed) {
-    // Release is stale/points at evicted blobs. Regenerate once.
-    try {
-      releaseContent = await generateReleaseContent(route, github, cache, env, ctx);
-      ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseVariant, releaseContent));
-      refreshed = true;
-      response = await findAndFetch();
-    } catch {
-      return new Response(emptyBody, { headers: emptyHeaders });
-    }
+  // Cached Release → parse → blob lookup. Kick off a background validation
+  // so the next request sees fresh data.
+  const cachedRelease = await cache.getReleaseFile(owner, repo, releaseVariant);
+  const cachedResponse = cachedRelease ? await findAndFetch(cachedRelease) : null;
+  if (cachedResponse) {
+    ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
+    return cachedResponse;
   }
 
-  if (response) {
-    if (!refreshed) ctx.waitUntil(validateAndRefreshCache(route, github, cache, env));
-    return response;
+  // Cold cache, or the Release points at evicted blobs: regenerate once
+  // (which also writes blobs) and cache it.
+  let releaseContent: string;
+  try {
+    releaseContent = await generateReleaseContent(route, github, cache, env, ctx);
+  } catch (error) {
+    // A header fetch failure is a 503, never an empty Packages file.
+    if (error instanceof IncompleteSnapshotError) throw error;
+    return new Response(emptyBody, { headers: emptyHeaders });
   }
+  ctx.waitUntil(cache.setReleaseFile(owner, repo, releaseVariant, releaseContent));
 
-  // Release has no entry for this arch (no packages on this arch).
-  return new Response(emptyBody, { headers: emptyHeaders });
-}
-
-/**
- * Generate packages content from multiple releases for aggregated assets
- */
-async function generatePackagesContentMultiRelease(
-  owner: string,
-  repo: string,
-  assets: GitHubAsset[],
-  githubToken?: string
-): Promise<PackageEntry[]> {
-  // Build package entries with concurrency limiting to avoid subrequest limits
-  // (Cloudflare Workers limits: 50 free tier, 1000 paid tier)
-  return mapWithConcurrencyFiltered(
-    assets,
-    async (asset) => {
-      try {
-        return await buildPackageEntry(asset, githubToken);
-      } catch (error) {
-        console.error(`Failed to process ${asset.name}:`, error);
-        return null;
-      }
-    },
-    30 // Conservative concurrency limit for both tiers
-  );
+  // A Release with no entry for this arch has no packages on it.
+  return (await findAndFetch(releaseContent)) ?? new Response(emptyBody, { headers: emptyHeaders });
 }
 
 /**
@@ -1288,85 +1203,6 @@ interface RpmSnapshot {
 }
 
 /**
- * Thrown when a package header could not be fetched. A snapshot built
- * without that package would differ from one built elsewhere for the same
- * releases, and its signature would not verify against their repomd.xml.
- */
-export class IncompleteSnapshotError extends Error {
-  constructor(failed: string[]) {
-    super(`Could not fetch RPM headers for: ${failed.join(', ')}`);
-    this.name = 'IncompleteSnapshotError';
-  }
-}
-
-const RPM_FETCH_ATTEMPTS = 3;
-const RPM_FETCH_BACKOFF_MS = 250;
-
-/**
- * Build one package entry, retrying fetch failures with backoff.
- * @returns the entry, or null when the package itself is unusable
- * @throws RpmFetchError when every attempt failed to fetch
- */
-async function buildRpmPackageEntryWithRetry(
-  asset: GitHubAsset,
-  githubToken?: string
-): Promise<RpmPackageEntry | null> {
-  for (let attempt = 1; ; attempt++) {
-    try {
-      return await buildRpmPackageEntry(asset, githubToken);
-    } catch (error) {
-      if (!(error instanceof RpmFetchError)) {
-        console.error(`Failed to process ${asset.name}:`, error);
-        return null;
-      }
-      if (attempt === RPM_FETCH_ATTEMPTS) throw error;
-      await new Promise(resolve => setTimeout(resolve, RPM_FETCH_BACKOFF_MS * 2 ** (attempt - 1)));
-    }
-  }
-}
-
-/**
- * Build RPM package entries from assets. Entries are cached per asset
- * digest, so a build that aborts still keeps the headers it did fetch.
- * @throws IncompleteSnapshotError when any header fetch failed
- */
-async function buildRpmPackages(
-  route: RouteInfo,
-  cache: CacheManager,
-  assets: GitHubAsset[],
-  githubToken?: string
-): Promise<RpmPackageEntry[]> {
-  const { owner, repo } = route;
-  const rpmAssets = filterRpmAssets(assets);
-  const failed: string[] = [];
-
-  // Concurrency is limited to stay under the Workers subrequest limit.
-  const entries = await mapWithConcurrencyFiltered(
-    rpmAssets,
-    async (asset) => {
-      // filterRpmAssets guarantees a "sha256:" digest.
-      const sha256 = asset.digest!.slice(7);
-      const cached = await cache.getRpmEntry(owner, repo, sha256, asset.name);
-      if (cached) return cached;
-
-      try {
-        const entry = await buildRpmPackageEntryWithRetry(asset, githubToken);
-        if (entry) await cache.setRpmEntry(owner, repo, sha256, asset.name, entry);
-        return entry;
-      } catch (error) {
-        console.error(`Failed to fetch ${asset.name}:`, error);
-        failed.push(asset.name);
-        return null;
-      }
-    },
-    30
-  );
-
-  if (failed.length > 0) throw new IncompleteSnapshotError(failed);
-  return entries;
-}
-
-/**
  * Build a complete, internally-consistent RPM metadata snapshot. The output
  * depends only on the release list, so every colo builds identical bytes.
  * @throws IncompleteSnapshotError when any header fetch failed
@@ -1374,7 +1210,6 @@ async function buildRpmPackages(
 async function buildRpmSnapshot(
   route: RouteInfo,
   github: GitHubClient,
-  cache: CacheManager,
   env: Env
 ): Promise<RpmSnapshot | null> {
   const { owner, repo, releaseVariant } = route;
@@ -1384,8 +1219,12 @@ async function buildRpmSnapshot(
   if (releases.length === 0) return null;
 
   const releaseIdsHash = await computeReleaseIdsHash(releases);
-  const allAssets = aggregateAssets(releases);
-  const packages = await buildRpmPackages(route, cache, allAssets, env.GITHUB_TOKEN);
+  const rpmAssets = filterRpmAssets(aggregateAssets(releases));
+  const headers = await loadHeaders(env.ENTRIES, 'rpm', rpmAssets, url => fetchRpmMetadata(url, env.GITHUB_TOKEN));
+  const packages = rpmAssets.flatMap(asset => {
+    const headerData = headers.get(asset);
+    return headerData ? [buildRpmPackageEntry(asset, headerData)] : [];
+  });
 
   const primaryXml = generatePrimaryXml(packages);
   const filelistsXml = generateFilelistsXml(packages);
@@ -1482,7 +1321,7 @@ async function validateAndRefreshRpmSnapshot(
       return;
     }
 
-    const snapshot = await buildRpmSnapshot(route, github, cache, env);
+    const snapshot = await buildRpmSnapshot(route, github, env);
     if (!snapshot) return;
     await cacheRpmSnapshot(route, cache, snapshot);
   } catch (error) {
@@ -1511,7 +1350,7 @@ async function getRepomdWithSignature(
     return { repomd: cached.repomd, signature: cached.signature };
   }
 
-  const snapshot = await buildRpmSnapshot(route, github, cache, env);
+  const snapshot = await buildRpmSnapshot(route, github, env);
   if (!snapshot) {
     // No releases — return an empty repomd.xml so DNF doesn't error out.
     const empty = await buildRepomd({
@@ -1608,7 +1447,7 @@ async function handleRpmXml(
 
     // Cache miss. Rebuild and serve only if the requested hash matches a
     // current blob — this prevents serving bogus content for an old hash.
-    const snapshot = await buildRpmSnapshot(route, github, cache, env);
+    const snapshot = await buildRpmSnapshot(route, github, env);
     if (snapshot) {
       const blob = snapshot.blobs.get(hash);
       if (blob) {
@@ -1626,7 +1465,7 @@ async function handleRpmXml(
   }
 
   // Unhashed legacy path: regenerate on the fly.
-  const snapshot = await buildRpmSnapshot(route, github, cache, env);
+  const snapshot = await buildRpmSnapshot(route, github, env);
   const emptyBody = (): Uint8Array => new TextEncoder().encode(
     xmlType === 'primary' ? generatePrimaryXml([]) :
     xmlType === 'filelists' ? generateFilelistsXml([]) :

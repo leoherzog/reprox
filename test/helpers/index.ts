@@ -6,6 +6,7 @@
  */
 
 import { vi } from 'vitest';
+import { env } from 'cloudflare:workers';
 import type { Env } from '../../src/types';
 
 // ============================================================================
@@ -13,7 +14,8 @@ import type { Env } from '../../src/types';
 // ============================================================================
 
 /**
- * Create a mock Cloudflare Workers environment
+ * Create a mock Cloudflare Workers environment. ENTRIES is the local KV
+ * namespace from wrangler.toml, isolated per test file.
  */
 export function createMockEnv(overrides: Partial<Env> = {}): Env {
   return {
@@ -21,8 +23,9 @@ export function createMockEnv(overrides: Partial<Env> = {}): Env {
     GPG_PRIVATE_KEY: '',
     GPG_PASSPHRASE: '',
     CACHE_TTL: '86400',
+    ENTRIES: (env as Env).ENTRIES,
     ...overrides,
-  } as Env;
+  };
 }
 
 /**
@@ -172,7 +175,7 @@ export function createAsset(overrides: Partial<GitHubAsset> = {}): GitHubAsset {
 // Test Data Builders - RPM
 // ============================================================================
 
-import type { RpmPackageEntry, RpmHeaderData } from '../../src/types';
+import type { RpmHeaderData } from '../../src/types';
 
 /**
  * Create RPM header data with sensible defaults
@@ -209,20 +212,6 @@ export function createRpmHeaderData(overrides: Partial<RpmHeaderData> = {}): Rpm
     files: [],
     primaryFiles: [],
     changelog: [],
-    ...overrides,
-  };
-}
-
-/**
- * Create an RPM package entry with sensible defaults
- */
-export function createRpmPackageEntry(overrides: Partial<RpmPackageEntry> = {}): RpmPackageEntry {
-  return {
-    headerData: createRpmHeaderData(overrides.headerData),
-    filename: 'test-package-1.0.0-1.x86_64.rpm',
-    size: 50000,
-    checksum: 'abc123def456',
-    checksumType: 'sha256',
     ...overrides,
   };
 }

@@ -20,6 +20,7 @@ export const TEST_REPOS: TestRepo[] = [
   { owner: 'localsend', repo: 'localsend', expectedPackageName: 'localsend', hasDeb: true, hasRpm: false },
   { owner: 'Heroic-Games-Launcher', repo: 'HeroicGamesLauncher', expectedPackageName: 'heroic', hasDeb: true, hasRpm: true },
   { owner: 'balena-io', repo: 'etcher', expectedPackageName: 'balena-etcher', hasDeb: true, hasRpm: false },
+  { owner: 'rustdesk', repo: 'rustdesk', expectedPackageName: 'rustdesk', hasDeb: true, hasRpm: true },
 ];
 
 // =============================================================================

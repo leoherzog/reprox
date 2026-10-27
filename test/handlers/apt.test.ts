@@ -17,6 +17,7 @@ import {
   createMockExecutionContext,
   createMockGitHubRelease,
   createMockGitHubAsset,
+  createControlData,
   type MockExecutionContext,
 } from '../helpers';
 
@@ -795,6 +796,111 @@ describe('APT packages-blob ordering', () => {
         ctxN,
       );
       expect(resp.status).toBe(200);
+    }
+  });
+});
+
+// ============================================================================
+// Header fetch failures and the global header store
+// ============================================================================
+
+describe('APT header fetch failures', () => {
+  const STORED_DIGEST = 'e'.repeat(64);
+  const STORED_ASSET = createMockGitHubAsset({
+    name: 'stored-pkg_1.0_amd64.deb',
+    digest: `sha256:${STORED_DIGEST}`,
+    browser_download_url: 'https://github.com/o/r/releases/download/v1/stored-pkg_1.0_amd64.deb',
+  });
+  const FAILING_ASSET = createMockGitHubAsset({
+    name: 'failing-pkg_1.0_amd64.deb',
+    digest: `sha256:${'f'.repeat(64)}`,
+    browser_download_url: 'https://github.com/o/r/releases/download/v2/failing-pkg_1.0_amd64.deb',
+  });
+
+  /** Mock GitHub with the given releases; every .deb header fetch returns 429. */
+  function mockReleasesWithFailingAssets(releases: ReturnType<typeof createMockGitHubRelease>[]) {
+    let assetFetches = 0;
+    vi.mocked(fetch).mockImplementation(async (url) => {
+      if (url.toString().includes('api.github.com')) {
+        return new Response(JSON.stringify(releases), { status: 200 });
+      }
+      assetFetches++;
+      return new Response('rate limited', { status: 429 });
+    });
+    return () => assetFetches;
+  }
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    await createMockEnv().ENTRIES.put(
+      `deb/v1/${STORED_DIGEST}`,
+      JSON.stringify(createControlData({ package: 'stored-pkg', version: '1.0' })),
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('serves a stored header without fetching it', async () => {
+    const assetFetches = mockReleasesWithFailingAssets([createMockGitHubRelease({ id: 1, assets: [STORED_ASSET] })]);
+
+    const response = await fetchAndFlush(
+      new Request('https://example.com/kv-owner/kv-repo/dists/stable/main/binary-amd64/Packages'),
+      createMockEnv(),
+      createMockExecutionContext(),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('Package: stored-pkg');
+    expect(assetFetches()).toBe(0);
+  });
+
+  it('returns 503 instead of an incomplete Packages file', async () => {
+    mockReleasesWithFailingAssets([
+      createMockGitHubRelease({ id: 2, assets: [FAILING_ASSET] }),
+      createMockGitHubRelease({ id: 1, assets: [STORED_ASSET] }),
+    ]);
+    const env = createMockEnv();
+
+    for (const path of ['main/binary-amd64/Packages', 'main/binary-amd64/Packages.gz', 'InRelease', 'Release']) {
+      const response = await fetchAndFlush(
+        new Request(`https://example.com/flaky-owner/flaky-repo/dists/stable/${path}`),
+        env,
+        createMockExecutionContext(),
+      );
+      expect(response.status, path).toBe(503);
+      expect(response.headers.get('Retry-After'), path).toBe('5');
+      await response.arrayBuffer();
+    }
+    expect(await env.ENTRIES.get(`deb/v1/${'f'.repeat(64)}`)).toBeNull();
+  });
+
+  it('keeps the cached InRelease and Release when a refresh cannot fetch a header', async () => {
+    const env = createMockEnv();
+    const base = 'https://example.com/refresh-owner/refresh-repo/dists/stable';
+    const get = (file: string) => fetchAndFlush(new Request(`${base}/${file}`), env, createMockExecutionContext());
+    const v1 = createMockGitHubRelease({ id: 1, assets: [STORED_ASSET] });
+
+    mockReleasesWithFailingAssets([v1]);
+    const before = { InRelease: await (await get('InRelease')).text(), Release: await (await get('Release')).text() };
+    expect(before.Release).toContain('main/binary-amd64/Packages');
+
+    // Upstream publishes a release whose header cannot be fetched. Its later
+    // date would change the Release if the refresh dropped the package. The
+    // release IDs hash has lapsed, as it does 5 minutes after each refresh.
+    const v2 = createMockGitHubRelease({ id: 2, published_at: '2024-02-01T00:00:00Z', assets: [FAILING_ASSET] });
+    mockReleasesWithFailingAssets([v2, v1]);
+    await caches.default.delete('https://reprox.internal/release-ids-hash/stable/refresh-owner/refresh-repo');
+
+    for (let round = 0; round < 2; round++) {
+      for (const [file, expected] of Object.entries(before)) {
+        const response = await get(file);
+        expect(response.status, file).toBe(200);
+        expect(await response.text(), file).toBe(expected);
+      }
     }
   });
 });

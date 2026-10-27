@@ -53,6 +53,20 @@ describeIntegration('Real .deb Parsing', () => {
         // Maintainer should be present
         expect(metadata.maintainer).toBeTruthy();
       });
+
+      it('parses every .deb in the release concurrently', async () => {
+        // Builds parse packages in parallel, so decoders must not share state between calls
+        const assets = await getLatestReleaseAssets(repo.owner, repo.repo);
+        const debs = assets.filter(a => a.name.endsWith('.deb'));
+
+        const parsed = await Promise.all(
+          debs.map(async deb => parseDebBufferAsync(await fetchPackageHeader(deb.browser_download_url)))
+        );
+
+        for (const metadata of parsed) {
+          expect(metadata.version).toMatch(/^\d+\.\d+/);
+        }
+      });
     });
   }
 });

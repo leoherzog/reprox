@@ -6,7 +6,7 @@ import {
   getLatestReleaseAssets,
   findRpmAsset,
 } from './setup';
-import { extractRpmMetadata } from '../../src/parsers/rpm';
+import { fetchRpmMetadata } from '../../src/generators/repodata';
 
 // =============================================================================
 // Real .rpm Parsing Integration Tests
@@ -26,11 +26,7 @@ describeIntegration('Real .rpm Parsing', () => {
           throw new Error(`No x86_64 .rpm found for ${repo.owner}/${repo.repo}`);
         }
 
-        // extractRpmMetadata already uses Range requests internally
-        const metadata = await extractRpmMetadata(
-          rpm.browser_download_url,
-          GITHUB_TOKEN
-        );
+        const metadata = (await fetchRpmMetadata(rpm.browser_download_url, GITHUB_TOKEN))!;
 
         // Verify core metadata
         expect(metadata.name).toBe(repo.expectedPackageName);
@@ -47,10 +43,7 @@ describeIntegration('Real .rpm Parsing', () => {
           return; // Skip if no rpm found
         }
 
-        const metadata = await extractRpmMetadata(
-          rpm.browser_download_url,
-          GITHUB_TOKEN
-        );
+        const metadata = (await fetchRpmMetadata(rpm.browser_download_url, GITHUB_TOKEN))!;
 
         // At least one of vendor or packager should be present
         const hasVendorInfo = metadata.vendor || metadata.packager;
@@ -65,10 +58,7 @@ describeIntegration('Real .rpm Parsing', () => {
           return;
         }
 
-        const metadata = await extractRpmMetadata(
-          rpm.browser_download_url,
-          GITHUB_TOKEN
-        );
+        const metadata = (await fetchRpmMetadata(rpm.browser_download_url, GITHUB_TOKEN))!;
 
         // License should be present
         expect(metadata.license).toBeTruthy();
@@ -96,10 +86,7 @@ describeIntegration('Multi-architecture .rpm Parsing', () => {
           return;
         }
 
-        const metadata = await extractRpmMetadata(
-          rpm.browser_download_url,
-          GITHUB_TOKEN
-        );
+        const metadata = (await fetchRpmMetadata(rpm.browser_download_url, GITHUB_TOKEN))!;
 
         expect(metadata.name).toBe(repo.expectedPackageName);
         expect(metadata.arch).toMatch(/aarch64|arm64/);
@@ -124,10 +111,7 @@ describeIntegration('RPM Field Extraction', () => {
 
         if (!rpm) return;
 
-        const metadata = await extractRpmMetadata(
-          rpm.browser_download_url,
-          GITHUB_TOKEN
-        );
+        const metadata = (await fetchRpmMetadata(rpm.browser_download_url, GITHUB_TOKEN))!;
 
         // Should have some files listed
         expect(metadata.files).toBeInstanceOf(Array);
@@ -141,10 +125,7 @@ describeIntegration('RPM Field Extraction', () => {
 
         if (!rpm) return;
 
-        const metadata = await extractRpmMetadata(
-          rpm.browser_download_url,
-          GITHUB_TOKEN
-        );
+        const metadata = (await fetchRpmMetadata(rpm.browser_download_url, GITHUB_TOKEN))!;
 
         // Requires and provides should be arrays (may be empty)
         expect(metadata.requires).toBeInstanceOf(Array);

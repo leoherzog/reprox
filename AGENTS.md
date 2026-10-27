@@ -29,7 +29,7 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 1. **Entry Point** (`src/index.ts`) - Routes requests based on URL pattern, detects prerelease variant
 2. **GitHub Client** (`src/github/api.ts`) - Fetches all releases with pagination via `getAllReleases()`
 3. **Asset Aggregation** - Combines assets from all releases into a unified package list
-4. **Parsers** (`src/parsers/`) - Extract package metadata using Range Requests (64KB for .deb, 256KB for .rpm)
+4. **Parsers** (`src/parsers/`) - Extract package metadata using Range Requests (64KB for .deb, 256KB for .rpm), only for headers missing from the KV header store (`src/cache/headers.ts`)
 5. **Generators** (`src/generators/`) - Generate repository metadata files (Packages, Release, repomd.xml, etc.)
 6. **Cache** (`src/cache/cache.ts`) - Cache API with release IDs hash validation for freshness
 
@@ -77,12 +77,14 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - `streams.ts` - Stream reading utilities (`readStreamToBuffer`, `concatUint8Arrays`)
 - `architectures.ts` - Architecture detection from filenames (Debian and RPM)
 - `xml.ts` - XML escaping and control character sanitization (removes invalid XML 1.0 chars)
-- `concurrency.ts` - Concurrency-limited Promise execution (`mapWithConcurrency`, `mapWithConcurrencyFiltered`) to avoid Cloudflare subrequest limits
+- `concurrency.ts` - Concurrency-limited Promise execution (`mapWithConcurrency`)
+- `fetch.ts` - Range requests for package headers (`fetchRange`). `HeaderFetchError` marks a network or HTTP failure, which callers must not treat as a bad package
 
 **Other**
 - `src/signing/gpg.ts` - OpenPGP signing (cleartext and detached)
 - `src/github/api.ts` - GitHub API client with `getAllReleases()` pagination
 - `src/cache/cache.ts` - Cache API wrapper with variant-aware keys
+- `src/cache/headers.ts` - Global parsed-header store in Workers KV (`loadHeaders()`, `IncompleteSnapshotError`)
 - `src/lib/xz.ts` - XZ decompression wrapper for Workers (see below)
 
 **Landing Page** (`scripts/build-readme.ts` → `src/generated/readme-html.ts`)
@@ -119,17 +121,24 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - Background validation refreshes cache without blocking requests
 - RPM metadata files (primary/filelists/other, both .xml and .xml.gz) are stored as **content-addressed blobs** keyed by their SHA256. `repomd.xml` references them via `<location href="repodata/{sha256}-primary.xml.gz"/>` (Fedora's `unique_md_filenames` convention). Blobs are immutable — a client holding any historical `repomd.xml` resolves its references against the exact bytes that were hashed into it, eliminating the race where background refresh could update `primary.xml.gz` between a client's `repomd.xml` fetch and its follow-up fetches.
 
+**Parsed Header Store:**
+- Parsed headers live in the `ENTRIES` KV namespace, shared by every colo, so a colo with a cold Cache API fetches from GitHub only the headers no colo has parsed. RPM and APT builds share one path, `loadHeaders()`.
+- A value is the parser output alone (`RpmHeaderData` or `DebianControlData`), a pure function of the asset bytes, keyed `{rpm|deb}/v{n}/{sha256}`. Filename, size, checksum, pool path and the filename arch fallback come from the asset at build time and are never stored.
+- Bump the version in `KEY_PREFIXES` after a parser change; old entries are then ignored.
+- Only successful parses are stored. A failed fetch or an unusable header (unparseable, past the range ladder) stores nothing, so the next build tries again.
+- Reads are bulk `get()` calls of 25 keys with the default `cacheTtl`. KV caches misses too, so a longer `cacheTtl` would hide headers another colo has just stored.
+- A bulk `get()` over KV's 25 MB response limit fails with 413, which large RPM headers reach. A failed batch is read again one key per `get()`, and only a key whose own read fails counts as a miss.
+
 **Deterministic RPM Snapshots:**
 - The Cache API is per-colo, and a client can fetch `repomd.xml` and `repomd.xml.asc` from different colos. The signature only verifies if every colo builds byte-identical `repomd.xml` for the same release list.
-- A header fetch that fails is retried, then aborts the build with `IncompleteSnapshotError` (503 with `Retry-After`). Never drop a package because of a fetch failure, and never cache a snapshot built without one.
+- A header fetch that fails is retried, then aborts the build with `IncompleteSnapshotError` (503 with `Retry-After`). Never drop a package because of a fetch failure, and never cache a snapshot built without one. APT builds follow the same rule, so an incomplete Packages file is never served or cached.
 - Packages are dropped only for reasons that hold in every colo: no digest, unparseable header, header past the range ladder.
-- Parsed headers are cached per asset digest, so an aborted build keeps its progress and the retry fetches only what failed.
-- `repomd.xml` and its signature share one cache entry. A background refresh that fails leaves the previous snapshot in place.
+- Headers parsed before an aborted build are already in the header store, so the retry fetches only what failed.
+- `repomd.xml` and its signature share one cache entry. A background refresh that fails leaves the previous snapshot in place, and the APT equivalent leaves the cached Release in place.
 
 **Concurrency Limiting:**
-- Cloudflare Workers has subrequest limits (50 free tier, 1000 paid)
-- `mapWithConcurrencyFiltered()` processes assets with limited parallelism (default: 30)
-- Prevents hitting subrequest limits when processing many packages
+- `loadHeaders()` fetches header misses with `mapWithConcurrency()`, which keeps at most 30 in flight
+- The cap bounds fetches in flight, not the subrequest total. Each miss costs at least two subrequests, because GitHub redirects release downloads, against the Workers limit (50 external on the free plan, 10,000 paid by default)
 
 **Range Requests:** Only fetches package headers to minimize bandwidth (64KB for .deb, 256KB for .rpm)
 
@@ -139,7 +148,7 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 
 ### Cache Keys
 
-All cache keys include the release variant for proper isolation:
+All Cache API keys include the release variant for proper isolation. Header store keys are content-addressed and shared across repos and variants:
 
 | Type | Key Pattern |
 |------|-------------|
@@ -151,7 +160,8 @@ All cache keys include the release variant for proper isolation:
 | Asset URL | `asset-url/{variant}/{owner}/{repo}/{releaseHash}/{filename}` |
 | RPM Snapshot (repomd.xml + signature + release IDs hash, one entry) | `rpm/snapshot/{variant}/{owner}/{repo}` |
 | RPM Blob (content-addressed) | `rpm/blob/{variant}/{owner}/{repo}/{sha256}` |
-| RPM Package Entry (parsed header, keyed by asset digest) | `rpm/entry/{owner}/{repo}/{sha256}/{filename}` |
+| Parsed RPM header (KV `ENTRIES`, keyed by asset digest) | `rpm/v1/{sha256}` |
+| Parsed .deb control data (KV `ENTRIES`, keyed by asset digest) | `deb/v1/{sha256}` |
 
 The legacy `binary-{arch}/Packages[.gz]` URL has no dedicated mutable key — `handlePackages`/`handlePackagesGz` parses the current cached `Release`, extracts the SHA256 for the requested path, and serves the content-addressed blob. This inherits the blob cache's immutability: a concurrent refresh producing a newer Release cannot corrupt in-flight client responses.
 
@@ -165,12 +175,12 @@ The legacy `binary-{arch}/Packages[.gz]` URL has no dedicated mutable key — `h
 - `control.tar.zst` - Zstandard (uses fzstd library)
 - `control.tar` - uncompressed
 
-**XZ WASM Handling** (`src/lib/xz.ts`): The xzwasm library embeds WASM as base64 and uses dynamic instantiation, which doesn't work in Workers. Our solution:
+**XZ WASM Handling** (`src/lib/xz.ts`): xzwasm's JS wrapper instantiates its embedded WASM dynamically, which Workers blocks, so the wrapper is unused:
 1. `scripts/extract-xz-wasm.cjs` extracts the WASM binary from xzwasm on `npm install` (postinstall hook)
-2. `src/lib/xz.ts` imports the WASM statically and patches `XzReadableStream._moduleInstance` before use
+2. `src/lib/xz.ts` imports the WASM statically and drives `create_context`/`supply_input`/`get_next_output`/`destroy_context` in one synchronous loop, copying each output chunk out of WASM memory. Every caller shares one instance, so an `await` inside the loop would let a concurrent decompression detach or overwrite its buffers.
 3. The extracted `src/lib/xz-decompress.wasm` is gitignored (auto-generated)
 
-If xzwasm is updated, running `npm install` will automatically extract the new WASM version.
+`npm install` re-extracts the WASM when xzwasm is updated. `xz.ts` hardcodes the context layout (`bufsize`, then `xz_buf` `in`/`in_pos`/`in_size`/`out`/`out_pos`), so check a new xzwasm version against it.
 
 ## Environment Variables
 
@@ -181,9 +191,12 @@ Optional secrets (set via `wrangler secret put`):
 - `GITHUB_TOKEN` - GitHub personal access token for higher API rate limits and private repository access
 - `CACHE_TTL` - Cache TTL in seconds for content (default: 86400). Release IDs hash uses a 5-minute TTL for freshness checks.
 
+Required binding:
+- `ENTRIES` - KV namespace for the parsed header store. `wrangler.toml` declares it without an `id`, so the first deploy creates it and links it to the Worker (Wrangler automatic provisioning, 4.45+). No `id` is needed in `wrangler.toml`.
+
 ## Testing
 
-Tests use Vitest with `@cloudflare/vitest-plugin` to run in a Workers-like environment. Test files are in `test/` directory.
+Tests use Vitest with `@cloudflare/vitest-plugin` to run in a Workers-like environment. Test files are in `test/` directory. `ENTRIES` is a local KV namespace read from `wrangler.toml`, isolated per test file, and `createMockEnv()` passes it through.
 
 ```bash
 npm run test                    # Run all tests
@@ -270,7 +283,7 @@ Integration tests in `test/integration/` fetch real packages from GitHub release
    npm run deploy
    ```
 
-   The CLI outputs the worker URL upon successful deployment.
+   The CLI outputs the worker URL upon successful deployment. The first deploy also creates the `ENTRIES` KV namespace.
 
 ### Secrets Reference
 

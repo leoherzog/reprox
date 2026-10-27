@@ -1,7 +1,7 @@
 import type { DebianControlData, PackageEntry, GitHubAsset } from '../types';
 import { parseDebBufferAsync } from '../parsers/deb';
 import { extractArchFromFilename } from '../utils/architectures';
-import { githubHeaders } from '../github/api';
+import { fetchRange } from '../utils/fetch';
 
 /**
  * Range request size for .deb header parsing
@@ -97,54 +97,27 @@ export function generatePackagesFile(entries: PackageEntry[]): string {
 }
 
 /**
- * Fetch and parse a .deb file to extract metadata
+ * Fetch and parse the control data of a .deb file.
+ * @throws HeaderFetchError when the range request failed
  */
 export async function fetchDebMetadata(
   downloadUrl: string,
   githubToken?: string
 ): Promise<DebianControlData> {
-  // GitHub download URLs need to follow redirects
-  // The browser_download_url redirects to the actual file
-  const response = await fetch(downloadUrl, {
-    headers: {
-      ...githubHeaders(githubToken, 'octet-stream'),
-      Range: `bytes=0-${RANGE_SIZE - 1}`,
-    },
-    redirect: 'follow',
-  });
-
-  if (!response.ok && response.status !== 206) {
-    throw new Error(`Failed to fetch .deb: ${response.status} ${response.statusText}`);
-  }
-
-  const buffer = await response.arrayBuffer();
-  return parseDebBufferAsync(buffer);
+  const controlData = await parseDebBufferAsync(await fetchRange(downloadUrl, RANGE_SIZE, githubToken));
+  if (!controlData.package) throw new Error('Invalid .deb: missing Package field');
+  if (!controlData.version) throw new Error('Invalid .deb: missing Version field');
+  return controlData;
 }
 
 /**
- * Build a PackageEntry from a GitHub asset
+ * Build a PackageEntry from a GitHub asset and its parsed control data
  */
-export async function buildPackageEntry(
-  asset: GitHubAsset,
-  githubToken?: string
-): Promise<PackageEntry> {
-  // Fetch metadata from .deb header
-  const controlData = await fetchDebMetadata(asset.browser_download_url, githubToken);
-
-  // Validate required fields
-  if (!controlData.package || controlData.package.length === 0) {
-    throw new Error(`Invalid .deb: missing Package field in ${asset.name}`);
-  }
-  if (!controlData.version || controlData.version.length === 0) {
-    throw new Error(`Invalid .deb: missing Version field in ${asset.name}`);
-  }
-
+export function buildPackageEntry(asset: GitHubAsset, controlData: DebianControlData): PackageEntry {
   // Override architecture from filename if control says "all" but filename is specific
-  if (controlData.architecture === 'all') {
-    const filenameArch = extractArchFromFilename(asset.name);
-    if (filenameArch !== 'all') {
-      controlData.architecture = filenameArch;
-    }
+  const filenameArch = extractArchFromFilename(asset.name);
+  if (controlData.architecture === 'all' && filenameArch !== 'all') {
+    controlData = { ...controlData, architecture: filenameArch };
   }
 
   // The filename uses pool-style path structure: pool/{component}/{prefix}/{package}/{file}

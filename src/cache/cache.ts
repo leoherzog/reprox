@@ -10,7 +10,6 @@
  * - https://reprox.internal/release-ids-hash/{variant}/{owner}/{repo}
  * - https://reprox.internal/rpm/snapshot/{variant}/{owner}/{repo}
  * - https://reprox.internal/rpm/blob/{variant}/{owner}/{repo}/{sha256}
- * - https://reprox.internal/rpm/entry/{owner}/{repo}/{sha256}/{filename}
  *
  * All package-index bodies (APT Packages/Packages.gz, RPM primary/filelists/
  * other .xml/.xml.gz) are stored as immutable content-addressed blobs keyed
@@ -23,7 +22,7 @@
  * looking up the referenced blob; there is no separate mutable cache key.
  */
 
-import type { GitHubRelease, RpmPackageEntry } from '../types';
+import type { GitHubRelease } from '../types';
 import { sha256 } from '../utils/crypto';
 
 export type ReleaseVariant = 'stable' | 'prerelease';
@@ -169,10 +168,6 @@ export class CacheManager {
 
   private rpmSnapshotKey(owner: string, repo: string, variant: ReleaseVariant): string {
     return `rpm/snapshot/${variant}/${owner}/${repo}`;
-  }
-
-  private rpmEntryKey(owner: string, repo: string, sha256: string, filename: string): string {
-    return `rpm/entry/${owner}/${repo}/${sha256}/${encodeURIComponent(filename)}`;
   }
 
   private rpmBlobKey(owner: string, repo: string, variant: ReleaseVariant, sha256: string): string {
@@ -336,28 +331,6 @@ export class CacheManager {
   ): Promise<void> {
     const key = this.rpmSnapshotKey(owner, repo, variant);
     await this.putInCache(key, JSON.stringify(snapshot), this.defaultTtl);
-  }
-
-  /**
-   * Get the parsed header entry for an RPM asset. Keyed by the asset's
-   * SHA256, so an entry never goes stale.
-   */
-  async getRpmEntry(owner: string, repo: string, sha256: string, filename: string): Promise<RpmPackageEntry | null> {
-    const raw = await this.getFromCache(this.rpmEntryKey(owner, repo, sha256, filename));
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as RpmPackageEntry;
-    } catch {
-      return null;
-    }
-  }
-
-  /**
-   * Store the parsed header entry for an RPM asset.
-   */
-  async setRpmEntry(owner: string, repo: string, sha256: string, filename: string, entry: RpmPackageEntry): Promise<void> {
-    const key = this.rpmEntryKey(owner, repo, sha256, filename);
-    await this.putInCache(key, JSON.stringify(entry), this.defaultTtl);
   }
 
   /**

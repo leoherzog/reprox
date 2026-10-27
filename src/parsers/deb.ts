@@ -39,9 +39,9 @@ export async function parseDebBufferAsync(buffer: ArrayBuffer): Promise<DebianCo
   if (controlEntry.name.endsWith('.gz')) {
     controlTarData = await decompressGzipAsync(controlArchiveData);
   } else if (controlEntry.name.endsWith('.xz')) {
-    controlTarData = await decompressXzAsync(controlArchiveData);
+    controlTarData = decompressXz(controlArchiveData);
   } else if (controlEntry.name.endsWith('.zst')) {
-    controlTarData = decompressZstdData(controlArchiveData);
+    controlTarData = decompressZstd(controlArchiveData);
   } else if (controlEntry.name === 'control.tar') {
     controlTarData = controlArchiveData; // Uncompressed
   } else {
@@ -76,20 +76,6 @@ async function decompressGzipAsync(data: Uint8Array): Promise<Uint8Array> {
   const stream = blob.stream().pipeThrough(ds);
 
   return readStreamToBuffer(stream);
-}
-
-/**
- * Decompress XZ data using static WASM import (Cloudflare Workers compatible).
- */
-async function decompressXzAsync(data: Uint8Array): Promise<Uint8Array> {
-  return decompressXz(data);
-}
-
-/**
- * Decompress Zstandard data using fzstd library.
- */
-function decompressZstdData(data: Uint8Array): Uint8Array {
-  return decompressZstd(data);
 }
 
 /**

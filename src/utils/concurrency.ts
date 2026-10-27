@@ -1,8 +1,5 @@
 /**
- * Concurrency-limited Promise execution utilities
- *
- * Cloudflare Workers has subrequest limits (50 free tier, 1000 paid).
- * These utilities process promises in batches to stay within limits.
+ * Concurrency-limited Promise execution: bounds how many async operations are in flight at once.
  */
 
 const DEFAULT_CONCURRENCY = 30;
@@ -41,22 +38,4 @@ export async function mapWithConcurrency<T, R>(
 
   await Promise.all(workers);
   return results;
-}
-
-/**
- * Execute async functions with limited concurrency, filtering out null results.
- * Useful when some items may fail and should be skipped.
- *
- * @param items - Array of items to process
- * @param fn - Async function that may return null for items to skip
- * @param concurrency - Maximum concurrent operations (default: 30)
- * @returns Array of non-null results (order preserved for successful items)
- */
-export async function mapWithConcurrencyFiltered<T, R>(
-  items: T[],
-  fn: (item: T, index: number) => Promise<R | null>,
-  concurrency: number = DEFAULT_CONCURRENCY
-): Promise<R[]> {
-  const results = await mapWithConcurrency(items, fn, concurrency);
-  return results.filter((r): r is R => r !== null);
 }

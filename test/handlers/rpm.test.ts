@@ -14,6 +14,7 @@ import {
   createMockExecutionContext,
   createMockGitHubRelease,
   createMockGitHubAsset,
+  createRpmHeaderData,
   type MockExecutionContext,
 } from '../helpers';
 
@@ -210,6 +211,7 @@ describe('handleRepomd - header fetch failures', () => {
 
     expect(failed.status).toBe(503);
     expect(failed.headers.get('Retry-After')).toBe('5');
+    expect(await env.ENTRIES.get(`rpm/v1/${'a'.repeat(64)}`)).toBeNull();
 
     mockFlakyAssetFetch(0);
     const recovered = await fetchAndFlush(new Request(url), env, createMockExecutionContext());
@@ -226,6 +228,19 @@ describe('handleRepomd - header fetch failures', () => {
 
     expect(response.status).toBe(200);
     expect(assetFetches()).toBe(2);
+  });
+
+  it('builds from a stored header without fetching it', async () => {
+    const env = createMockEnv();
+    await env.ENTRIES.put(`rpm/v1/${'a'.repeat(64)}`, JSON.stringify(createRpmHeaderData({ name: 'stored-app' })));
+    const assetFetches = mockFlakyAssetFetch(Infinity);
+
+    const request = new Request('https://example.com/owner/kv-rpm/repodata/primary.xml');
+    const response = await fetchAndFlush(request, env, createMockExecutionContext());
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('<name>stored-app</name>');
+    expect(assetFetches()).toBe(0);
   });
 });
 
