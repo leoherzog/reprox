@@ -45,6 +45,11 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - **RPM**: `/{owner}/{repo}/prerelease/repodata/repomd.xml`, etc.
 - **Common**: `/{owner}/{repo}/prerelease/public.key`
 
+**Site:**
+- `/robots.txt` - Disallows `/_/` and every repository path (`/*/*/`), so crawlers never trigger GitHub fetches. apt and dnf ignore it.
+- `/sitemap.xml` - Lists the landing page, with the build timestamp as `lastmod`
+- Both are generated per request from the host, so a self-hosted instance points at itself
+
 **Internal API (for landing page search box):**
 - `/_/search?q={query}` - Proxies GitHub repository search with authenticated token and Cache API caching (5 min TTL)
 - `/_/package?owner={owner}&repo={repo}` - Extracts package name from latest release `.deb`/`.rpm` asset filenames, cached (5 min TTL)
@@ -94,6 +99,9 @@ npm run typecheck    # TypeScript type checking (tsc --noEmit)
 - Client-side JS uses `TreeWalker` for text node replacement (preserves DOM/event listeners) and `display: none` to hide instruction comments when a repo is selected
 - All CSS classes used by the search box must appear in the `searchBoxSkeleton` variable so PurgeCSS preserves them
 - The `/_/search` and `/_/package` endpoints in `src/index.ts` proxy GitHub API calls server-side using `GITHUB_TOKEN` for higher rate limits, with Cache API caching
+- The `<head>` carries canonical, Open Graph, Twitter card, and JSON-LD (`WebSite`, `SoftwareApplication`, `SoftwareSourceCode`) tags built from constants in the build script. Their `{{CANONICAL_URL}}` placeholder is always `https://{host}`, so a page fetched over HTTP never names itself canonical.
+- `/` serves HTML when `Accept` includes `text/html` or the `User-Agent` matches `crawlerPattern`, so crawlers that send `Accept: */*` still see the head tags. Both responses send `Vary: Accept, User-Agent`.
+- `public/` holds `og.png` (1200×630) and `apple-touch-icon.png` (180×180), served by Workers Static Assets before the Worker runs
 
 ### Design Patterns
 

@@ -7,6 +7,7 @@
  * - All CSS inlined, purged of unused selectors, and minified
  *
  * Exports both HTML and raw markdown with {{BASE_URL}} and {{FINGERPRINT_COMMENT}} placeholders.
+ * The HTML head also uses {{CANONICAL_URL}} for canonical, Open Graph, and JSON-LD URLs.
  */
 
 import { execSync } from 'node:child_process';
@@ -52,9 +53,7 @@ function getGitHubRepo(): string {
  * package.json is authoritative on the prod branch; git tags may not be fetched in
  * Cloudflare Workers Builds checkouts, so we can't rely on `git describe` alone.
  */
-function getGitInfo(): { version: string; url: string; label: string } {
-  const repo = getGitHubRepo();
-
+function getGitInfo(repo: string): { version: string; url: string; label: string } {
   try {
     const pkg = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf-8'));
     if (pkg.version && pkg.version !== 'dev') {
@@ -89,8 +88,60 @@ function getGitInfo(): { version: string; url: string; label: string } {
   }
 }
 
-const gitInfo = getGitInfo();
+const githubRepo = getGitHubRepo();
+const gitInfo = getGitInfo(githubRepo);
 const buildTimestamp = new Date().toISOString();
+
+// Page metadata shared by the <head> tags and JSON-LD
+const siteName = 'Reprox';
+const siteTitle = 'Reprox - A Serverless GitHub Releases APT/RPM Gateway';
+const siteDescription =
+  "Reprox turns any GitHub repository's Releases into an APT or RPM repository, so apt and dnf can install and update its .deb and .rpm packages.";
+const ogImageAlt = 'Reprox: turn GitHub Releases into APT and RPM repositories';
+const repoUrl = `https://github.com/${githubRepo}`;
+const licenseUrl = 'https://opensource.org/license/mit';
+const canonicalUrl = '{{CANONICAL_URL}}';
+const softwareId = `${canonicalUrl}/#software`;
+
+const jsonLd = {
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'WebSite',
+      '@id': `${canonicalUrl}/#website`,
+      url: `${canonicalUrl}/`,
+      name: siteName,
+      description: siteDescription,
+    },
+    {
+      '@type': 'SoftwareApplication',
+      '@id': softwareId,
+      name: siteName,
+      url: `${canonicalUrl}/`,
+      description: siteDescription,
+      image: `${canonicalUrl}/og.png`,
+      applicationCategory: 'DeveloperApplication',
+      operatingSystem: 'Linux',
+      ...(gitInfo.label === 'Release' && { softwareVersion: gitInfo.version.replace(/^v/, '') }),
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      license: licenseUrl,
+      author: { '@type': 'Person', name: 'Leo Herzog', url: 'https://herzog.tech' },
+      sameAs: repoUrl,
+    },
+    {
+      '@type': 'SoftwareSourceCode',
+      name: siteName,
+      codeRepository: repoUrl,
+      programmingLanguage: 'TypeScript',
+      runtimePlatform: 'Cloudflare Workers',
+      license: licenseUrl,
+      targetProduct: { '@id': softwareId },
+    },
+  ],
+};
+
+// Escaping "<" keeps any "</script>" inside a string from closing the tag
+const jsonLdScript = JSON.stringify(jsonLd).replace(/</g, '\\u003c');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT_DIR = join(__dirname, '..');
@@ -506,14 +557,26 @@ async function main() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Reprox - A Serverless Github Releases APT/RPM Gateway</title>
-  <meta name="description" content="Turn Github Releases into an APT or RPM repository">
-  <meta name="keywords" content="linux, software, reprox, github, releases, apt, rpm, repository">
-  <meta property="og:url" content="{{BASE_URL}}">
+  <title>${siteTitle}</title>
+  <meta name="description" content="${siteDescription}">
+  <link rel="canonical" href="${canonicalUrl}/">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
   <meta property="og:type" content="website">
-  <meta property="og:title" content="Reprox - A Serverless Github Releases APT/RPM Gateway">
-  <meta property="og:description" content="Turn Github Releases into an APT or RPM repository">
+  <meta property="og:site_name" content="${siteName}">
+  <meta property="og:url" content="${canonicalUrl}/">
+  <meta property="og:title" content="${siteTitle}">
+  <meta property="og:description" content="${siteDescription}">
+  <meta property="og:image" content="${canonicalUrl}/og.png">
+  <meta property="og:image:type" content="image/png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="${ogImageAlt}">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <script type="application/ld+json">${jsonLdScript}</script>
   <style>${optimizedGithubCss}</style>
   <style media="(prefers-color-scheme: light)">${optimizedLightCss}</style>
   <style media="(prefers-color-scheme: dark)">${optimizedDarkCss}</style>
@@ -538,6 +601,8 @@ ${clientScript}
 export const README_HTML = ${JSON.stringify(html)};
 
 export const README_MARKDOWN = ${JSON.stringify(processedMarkdown)};
+
+export const BUILD_TIMESTAMP = ${JSON.stringify(buildTimestamp)};
 `;
 
   // Ensure output directory exists

@@ -26,7 +26,8 @@ import {
 import type { RepomdHashes } from './generators/repodata';
 import { signCleartext, signDetached, signDetachedBinary, extractPublicKey, getKeyFingerprint } from './signing/gpg';
 import { gzipCompress, sha256 } from './utils/crypto';
-import { README_HTML, README_MARKDOWN } from './generated/readme-html';
+import { escapeXml } from './utils/xml';
+import { README_HTML, README_MARKDOWN, BUILD_TIMESTAMP } from './generated/readme-html';
 
 const apiHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -35,6 +36,9 @@ const apiHeaders = {
 } as const;
 
 const validNamePattern = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
+
+/** Search crawlers and link-preview bots get the HTML page even when their Accept header omits text/html. */
+const crawlerPattern = /bot|crawl|spider|slurp|facebookexternalhit|preview|whatsapp|mastodon|cardyb/i;
 
 /**
  * Reprox - Serverless APT/RPM Repository Gateway
@@ -72,6 +76,14 @@ export default {
       // Handle favicon request
       if (url.pathname === '/favicon.ico' || url.pathname === '/favicon.svg') {
         return handleFavicon();
+      }
+
+      if (url.pathname === '/robots.txt') {
+        return handleRobots(url);
+      }
+
+      if (url.pathname === '/sitemap.xml') {
+        return handleSitemap(url);
       }
 
       // Handle search API - proxies GitHub search with auth token and caching
@@ -373,12 +385,16 @@ async function handleReadme(request: Request, url: URL, env: Env): Promise<Respo
     }
   }
 
-  // Content negotiation: HTML for browsers, markdown for CLI/APIs
+  // Content negotiation: HTML for browsers and crawlers, markdown for CLI/APIs
   const acceptHeader = request.headers.get('Accept') || '';
-  if (acceptHeader.includes('text/html')) {
+  const userAgent = request.headers.get('User-Agent') || '';
+  const wantsHtml = acceptHeader.includes('text/html') ||
+    (!acceptHeader.includes('text/markdown') && crawlerPattern.test(userAgent));
+  if (wantsHtml) {
     // Serve pre-built static HTML
     const html = README_HTML
       .replace(/\{\{BASE_URL\}\}/g, baseUrl)
+      .replace(/\{\{CANONICAL_URL\}\}/g, canonicalOrigin(url))
       .replace(/\{\{FINGERPRINT_COMMENT\}\}/g, fingerprintComment)
       .replace(/\{\{FINGERPRINT_FOOTER\}\}/g, fingerprintFooter);
 
@@ -386,6 +402,7 @@ async function handleReadme(request: Request, url: URL, env: Env): Promise<Respo
       headers: {
         'Content-Type': 'text/html; charset=utf-8',
         'Cache-Control': 'public, max-age=300',
+        'Vary': 'Accept, User-Agent',
       },
     });
   }
@@ -399,6 +416,56 @@ async function handleReadme(request: Request, url: URL, env: Env): Promise<Respo
     headers: {
       'Content-Type': 'text/markdown; charset=utf-8',
       'Cache-Control': 'public, max-age=300',
+      'Vary': 'Accept, User-Agent',
+    },
+  });
+}
+
+/**
+ * Origin for canonical, Open Graph, and sitemap URLs. Always HTTPS, which every Workers hostname serves,
+ * so a page fetched over plain HTTP never names itself canonical.
+ */
+function canonicalOrigin(url: URL): string {
+  return `https://${url.host}`;
+}
+
+/**
+ * Handle robots.txt - keeps crawlers on the landing page and points them at the sitemap
+ */
+function handleRobots(url: URL): Response {
+  const body = `User-agent: *
+Disallow: /_/
+# Repository paths are for apt and dnf, which ignore robots.txt; crawling them costs GitHub API calls
+Disallow: /*/*/
+
+Sitemap: ${canonicalOrigin(url)}/sitemap.xml
+`;
+
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'public, max-age=86400',
+    },
+  });
+}
+
+/**
+ * Handle sitemap.xml - lists the landing page, the only indexable URL
+ */
+function handleSitemap(url: URL): Response {
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${escapeXml(canonicalOrigin(url))}/</loc>
+    <lastmod>${BUILD_TIMESTAMP}</lastmod>
+  </url>
+</urlset>
+`;
+
+  return new Response(body, {
+    headers: {
+      'Content-Type': 'application/xml; charset=utf-8',
+      'Cache-Control': 'public, max-age=86400',
     },
   });
 }

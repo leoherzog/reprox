@@ -137,6 +137,43 @@ describe('handleFavicon', () => {
 });
 
 // ============================================================================
+// robots.txt and sitemap.xml Tests
+// ============================================================================
+
+describe('handleRobots', () => {
+  it('disallows internal and repository paths and links the HTTPS sitemap', async () => {
+    const env = createMockEnv();
+    const ctx = createMockExecutionContext();
+
+    const response = await fetchAndFlush(new Request('http://example.com/robots.txt'), env, ctx);
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('text/plain; charset=utf-8');
+    expect(text).toContain('User-agent: *');
+    expect(text).toContain('Disallow: /_/');
+    expect(text).toContain('Disallow: /*/*/');
+    expect(text).toContain('Sitemap: https://example.com/sitemap.xml');
+  });
+});
+
+describe('handleSitemap', () => {
+  it('lists the HTTPS landing page with a lastmod date', async () => {
+    const env = createMockEnv();
+    const ctx = createMockExecutionContext();
+
+    const response = await fetchAndFlush(new Request('http://example.com/sitemap.xml'), env, ctx);
+    const text = await response.text();
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('Content-Type')).toBe('application/xml; charset=utf-8');
+    expect(text).toContain('<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">');
+    expect(text).toContain('<loc>https://example.com/</loc>');
+    expect(text).toMatch(/<lastmod>\d{4}-\d{2}-\d{2}T[\d:.]+Z<\/lastmod>/);
+  });
+});
+
+// ============================================================================
 // handleBinaryRedirect Tests - DEB
 // ============================================================================
 
@@ -390,6 +427,54 @@ describe('handleReadme - extended', () => {
     const httpsResponse = await fetchAndFlush(httpsRequest, env, httpsCtx);
     const httpsText = await httpsResponse.text();
     expect(httpsText).toContain('https://secure.example.com/');
+  });
+
+  it('serves HTML to crawlers that omit text/html from Accept', async () => {
+    const env = createMockEnv();
+
+    const botCtx = createMockExecutionContext();
+    const botRequest = new Request('https://example.com/', {
+      headers: { 'Accept': '*/*', 'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)' },
+    });
+    const botResponse = await fetchAndFlush(botRequest, env, botCtx);
+    expect(botResponse.headers.get('Content-Type')).toBe('text/html; charset=utf-8');
+    expect(botResponse.headers.get('Vary')).toBe('Accept, User-Agent');
+
+    const curlCtx = createMockExecutionContext();
+    const curlRequest = new Request('https://example.com/', {
+      headers: { 'Accept': '*/*', 'User-Agent': 'curl/8.11.0' },
+    });
+    const curlResponse = await fetchAndFlush(curlRequest, env, curlCtx);
+    expect(curlResponse.headers.get('Content-Type')).toBe('text/markdown; charset=utf-8');
+    expect(curlResponse.headers.get('Vary')).toBe('Accept, User-Agent');
+
+    const markdownBotCtx = createMockExecutionContext();
+    const markdownBotRequest = new Request('https://example.com/', {
+      headers: { 'Accept': 'text/markdown', 'User-Agent': 'ExampleBot/1.0' },
+    });
+    const markdownBotResponse = await fetchAndFlush(markdownBotRequest, env, markdownBotCtx);
+    expect(markdownBotResponse.headers.get('Content-Type')).toBe('text/markdown; charset=utf-8');
+  });
+
+  it('points canonical, Open Graph, and JSON-LD URLs at the HTTPS origin', async () => {
+    const env = createMockEnv();
+    const ctx = createMockExecutionContext();
+
+    const request = new Request('http://example.com/', { headers: { 'Accept': 'text/html' } });
+    const html = await (await fetchAndFlush(request, env, ctx)).text();
+
+    expect(html).not.toContain('{{CANONICAL_URL}}');
+    expect(html).toContain('<link rel="canonical" href="https://example.com/">');
+    expect(html).toContain('<meta property="og:url" content="https://example.com/">');
+    expect(html).toContain('<meta property="og:image" content="https://example.com/og.png">');
+    expect(html).toContain('<meta name="twitter:card" content="summary_large_image">');
+
+    const jsonLd = html.match(/<script type="application\/ld\+json">(.*?)<\/script>/s);
+    expect(jsonLd).not.toBeNull();
+    const data = JSON.parse(jsonLd![1]);
+    const types = data['@graph'].map((node: { '@type': string }) => node['@type']);
+    expect(types).toEqual(['WebSite', 'SoftwareApplication', 'SoftwareSourceCode']);
+    expect(data['@graph'][1].url).toBe('https://example.com/');
   });
 
   it('contains usage instructions for APT and RPM', async () => {
